@@ -1,0 +1,19 @@
+{
+  "festival_name": "Sample Harbour Echo Festival",
+  "city": "Bristol, UK",
+  "date": "2026-10-24",
+  "cancelled_act": { "name": "Sample Velvet Comet", "slot": "Main stage 21:00–22:30" },
+  "lineup": [
+    { "name": "Sample Paper Satellites", "stage": "Main", "slot": "19:30–20:30" },
+    { "name": "Sample Copper Orchard", "stage": "Harbour", "slot": "18:00–19:00" }
+  ],
+  "candidates": [
+    { "name": "Sample Neon Estuary", "available": true, "can_arrive_48h": true, "travel_hours": 3, "notes": "Sample: crew and backline confirmed by booker." },
+    { "name": "Sample Lunar Tram", "available": true, "can_arrive_48h": true, "travel_hours": 5, "notes": "Sample: production rider needs checking." },
+    { "name": "Sample Glass Meadow", "available": false, "can_arrive_48h": true, "travel_hours": 2, "notes": "Sample: unavailable." },
+    { "name": "Sample Silver Kite", "available": true, "can_arrive_48h": false, "travel_hours": 52, "notes": "Sample: cannot arrive with gear in time." },
+    { "name": "Sample Twin Lantern", "available": true, "can_arrive_48h": true, "travel_hours": 4, "notes": "Sample: choose which fictional act in the catalog." },
+    { "name": "Sample Distant Arcade", "available": true, "can_arrive_48h": true, "notes": "Sample: travel duration not yet recorded." }
+  ],
+  "ticket_types": ["Single day", "Weekend pass", "VIP"]
+}

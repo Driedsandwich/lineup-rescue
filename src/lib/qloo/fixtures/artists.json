@@ -1,0 +1,12 @@
+[
+  { "entity_id": "mock-artist-001", "name": "Sample Velvet Comet" },
+  { "entity_id": "mock-artist-002", "name": "Sample Paper Satellites" },
+  { "entity_id": "mock-artist-003", "name": "Sample Copper Orchard" },
+  { "entity_id": "mock-artist-004", "name": "Sample Neon Estuary" },
+  { "entity_id": "mock-artist-005", "name": "Sample Lunar Tram" },
+  { "entity_id": "mock-artist-006", "name": "Sample Glass Meadow" },
+  { "entity_id": "mock-artist-007", "name": "Sample Silver Kite" },
+  { "entity_id": "mock-artist-008", "name": "Sample Distant Arcade" },
+  { "entity_id": "mock-artist-009", "name": "Sample Twin Lantern" },
+  { "entity_id": "mock-artist-010", "name": "Sample Twin Lantern" }
+]

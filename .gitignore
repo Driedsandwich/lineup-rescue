@@ -1,0 +1,14 @@
+node_modules/
+.next/
+.env
+.env.*
+!.env.example
+.ref/
+.vercel/
+coverage/
+*.log
+.DS_Store
+live-cache/
+.cache/
+*.tsbuildinfo
+.npmrc
