@@ -1,0 +1,45 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { expect, it } from "vitest";
+import RescueForm from "../src/app/rescue-form";
+import ResultPanel, { EvidenceMeter } from "../src/app/result-panel";
+import { runAgent } from "../src/lib/agent/loop";
+import { comparePlans, sampleForMode } from "../src/lib/presentation";
+
+it("renders mode-aware running orders, accessible actions and the inline editor", () => {
+  for (const mode of ["mock", "live"] as const) {
+    const html = renderToStaticMarkup(createElement(RescueForm, { initialStatus: { qloo: mode, llm: "mock" } }));
+    expect(html).toContain(`<del>${sampleForMode(mode).cancelled_act.name}</del>`);
+    expect(html).toContain("Compare with LLM-only");
+    expect(html).toContain('id="scenario-editor"');
+    expect(html).toContain("role=\"status\"");
+    expect(html).toContain(mode === "mock" ? "Sample data" : "No artist booking is implied");
+  }
+});
+
+it("renders per-act radio choices, missing catalog copy, diff labels and editable drafts", async () => {
+  const scenario = sampleForMode("mock");
+  scenario.candidates.push({ name: "Sample Unknown", available: true, can_arrive_48h: true, notes: "" });
+  const qloo = await runAgent({ mode: "qloo", scenario }, new AbortController().signal);
+  const baseline = await runAgent({ mode: "baseline", scenario }, new AbortController().signal);
+  const differences = comparePlans(qloo.plans, baseline.plans);
+  const props = { differences, busy: true, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} };
+  const html = renderToStaticMarkup(createElement(ResultPanel, { ...props, result: qloo }));
+  expect(html).toContain('type="radio"');
+  expect(html).toContain('name="resolution-Sample Twin Lantern"');
+  expect(html).toContain("disabled");
+  expect(html).toContain("Qloo does not know this act yet; it was not scored.");
+  expect(html).toContain("Different choice at this position");
+  expect(html).toContain("Tool trace");
+  expect(html).toContain("Short social post");
+  const control = renderToStaticMarkup(createElement(ResultPanel, { ...props, result: baseline }));
+  expect(control).toContain("No audience evidence");
+  expect(control).not.toContain("<meter");
+});
+
+it("renders unknown evidence without a numeric meter and labels actual affinity accessibly", () => {
+  const unknown = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "No local heat evidence available.", baseline: false }));
+  expect(unknown).toContain("UNKNOWN"); expect(unknown).not.toContain("<meter");
+  const measured = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "Qloo affinity 0.500 (not a probability)", baseline: false }));
+  expect(measured).toContain('aria-label="Local heat: affinity 0.500, not a probability"');
+});

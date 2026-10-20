@@ -1,105 +1,107 @@
 "use client";
 
-import { useState } from "react";
-import sample from "../../samples/scenario.json";
+import { useEffect, useRef, useState } from "react";
 import type { RescueResponse, Scenario } from "../lib/contracts";
+import { filterCandidates } from "../lib/agent/constraints";
+import { comparePlans, runningOrder, sampleForMode, type ProviderStatus } from "../lib/presentation";
+import { requestRescue } from "../lib/rescue-client";
+import ScenarioEditor from "./scenario-editor";
+import ResultPanel from "./result-panel";
 
 type Mode = "qloo" | "baseline";
-type Props = { sampleData: boolean; mockPlanner: boolean };
-export default function RescueForm({ sampleData, mockPlanner }: Props) {
-  const [scenario, setScenario] = useState<Scenario>(sample);
+const stages = ["Filtering the phone list", "Resolving act names", "Ranking against both audiences", "Checking local heat", "Drafting plans and announcements"];
+
+export default function RescueForm({ initialStatus }: { initialStatus: ProviderStatus }) {
+  const [status, setStatus] = useState(initialStatus);
+  const [scenario, setScenario] = useState<Scenario>(() => sampleForMode(initialStatus.qloo));
   const [results, setResults] = useState<Partial<Record<Mode, RescueResponse>>>({});
   const [resolutions, setResolutions] = useState<Record<string, string>>({});
+  const [pendingChoices, setPendingChoices] = useState(false);
   const [busy, setBusy] = useState<Mode | null>(null);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState("");
-  function edit(next: Scenario) { setScenario(next); setResults({}); setResolutions({}); setError(""); }
-  async function run(mode: Mode) {
-    setBusy(mode); setError("");
-    try {
-      const response = await fetch("/api/rescue", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode, scenario, resolutions }) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(`${body.message ?? "Request failed"}${body.issues ? ` ${body.issues.map((i: { path: string; message: string }) => `${i.path}: ${i.message}`).join("; ")}` : ""}`);
-      setResults(previous => ({ ...previous, [mode]: body }));
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Request failed. Please retry."); }
-    finally { setBusy(null); }
+  const [statusError, setStatusError] = useState(false);
+  const lock = useRef(false);
+  const edited = useRef(false);
+  const resultAnchor = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/status", { cache: "no-store", signal: controller.signal }).then(async response => {
+      if (!response.ok) throw new Error("Status unavailable");
+      const next: ProviderStatus = await response.json();
+      if (!["live", "mock"].includes(next.qloo) || !["live", "mock"].includes(next.llm)) throw new Error("Invalid status");
+      setStatus(next);
+      if (next.qloo !== initialStatus.qloo && !edited.current && !lock.current) {
+        setScenario(sampleForMode(next.qloo)); setResults({}); setResolutions({}); setPendingChoices(false);
+      }
+    }).catch(() => { if (!controller.signal.aborted) setStatusError(true); });
+    return () => controller.abort();
+  }, [initialStatus.qloo]);
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(() => setProgress(previous => Math.min(previous + 1, stages.length - 1)), 1800);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  function edit(next: Scenario) {
+    edited.current = true; setScenario(next); setResults({}); setResolutions({}); setPendingChoices(false); setError("");
   }
+  function choose(name: string, id: string) {
+    setResolutions(previous => ({ ...previous, [name]: id }));
+    setPendingChoices(true); setResults(previous => ({ qloo: previous.qloo }));
+  }
+  async function run(mode: Mode) {
+    if (lock.current) return;
+    lock.current = true; setBusy(mode === "qloo" || !results.qloo || pendingChoices ? "qloo" : "baseline"); setProgress(0); setError("");
+    // Both requests use this exact snapshot. Editing is disabled until both finish.
+    const input = structuredClone(scenario);
+    const choices = { ...resolutions };
+    try {
+      if (mode === "qloo" || !results.qloo || pendingChoices) {
+        const qloo = await requestRescue("qloo", input, choices);
+        setResults(previous => ({ ...previous, qloo })); setPendingChoices(false);
+      }
+      if (mode === "baseline") {
+        setBusy("baseline"); setProgress(0);
+        const baseline = await requestRescue("baseline", input, choices);
+        setResults(previous => ({ ...previous, baseline }));
+      }
+      resultAnchor.current?.focus({ preventScroll: true });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "The run failed. Retry in a moment."); }
+    finally { lock.current = false; setBusy(null); }
+  }
+  const filtered = filterCandidates(scenario.candidates);
+  const differences = results.qloo && results.baseline && !pendingChoices ? comparePlans(results.qloo.plans, results.baseline.plans) : [];
   return <>
-    {sampleData && <p className="banner"><strong>Sample data</strong> — fictional acts and synthetic pseudo-affinity. No live Qloo results.</p>}
-    {mockPlanner && <p className="notice">Deterministic sample planner is active. No Anthropic requests are made.</p>}
-    <p id="privacy">Use public act names only. Do not enter personal data. Booker notes are sent only to the language model, never to Qloo.</p>
-    <form onSubmit={event => { event.preventDefault(); void run("qloo"); }} aria-describedby="privacy">
-      <fieldset disabled={busy !== null}>
-        <legend>1 · The festival</legend>
-        <div className="fields">
-          <label>Festival name<input required maxLength={200} value={scenario.festival_name} onChange={e => edit({ ...scenario, festival_name: e.target.value })} /></label>
-          <label>City<input required maxLength={200} value={scenario.city} onChange={e => edit({ ...scenario, city: e.target.value })} /></label>
-          <label>Festival date<input required type="date" value={scenario.date} onChange={e => edit({ ...scenario, date: e.target.value })} /></label>
-          <label>Cancelled act<input required maxLength={200} value={scenario.cancelled_act.name} onChange={e => edit({ ...scenario, cancelled_act: { ...scenario.cancelled_act, name: e.target.value } })} /></label>
-          <label>Cancelled slot<input required maxLength={200} value={scenario.cancelled_act.slot} onChange={e => edit({ ...scenario, cancelled_act: { ...scenario.cancelled_act, slot: e.target.value } })} /></label>
-        </div>
-      </fieldset>
-      <fieldset disabled={busy !== null}>
-        <legend>2 · Remaining lineup ({scenario.lineup.length}/20)</legend>
-        {scenario.lineup.map((act, index) => <div className="row" key={index}>
-          {(["name", "stage", "slot"] as const).map(field => <label key={field}>{field === "name" ? "Act name" : field === "stage" ? "Stage" : "Time slot"}<input required maxLength={200} value={act[field]} onChange={e => edit({ ...scenario, lineup: scenario.lineup.map((item, i) => i === index ? { ...item, [field]: e.target.value } : item) })} /></label>)}
-          <button type="button" aria-label={`Remove lineup act ${index + 1}`} onClick={() => edit({ ...scenario, lineup: scenario.lineup.filter((_, i) => i !== index) })}>Remove</button>
-        </div>)}
-        <button type="button" disabled={scenario.lineup.length >= 20} onClick={() => edit({ ...scenario, lineup: [...scenario.lineup, { name: "", stage: "", slot: "" }] })}>Add lineup act</button>
-      </fieldset>
-      <fieldset disabled={busy !== null}>
-        <legend>3 · The phone list ({scenario.candidates.length}/12)</legend>
-        <p>Availability and arrival with crew and gear are hard constraints. Recorded travel over 48 hours also excludes an act.</p>
-        {scenario.candidates.map((candidate, index) => <fieldset className="candidate" key={index}>
-          <legend>Candidate {index + 1}</legend>
-          <div className="fields">
-            <label>Act name<input required maxLength={200} value={candidate.name} onChange={e => edit({ ...scenario, candidates: scenario.candidates.map((item, i) => i === index ? { ...item, name: e.target.value } : item) })} /></label>
-            <label className="check"><input type="checkbox" checked={candidate.available} onChange={e => edit({ ...scenario, candidates: scenario.candidates.map((item, i) => i === index ? { ...item, available: e.target.checked } : item) })} />Available</label>
-            <label className="check"><input type="checkbox" checked={candidate.can_arrive_48h} onChange={e => edit({ ...scenario, candidates: scenario.candidates.map((item, i) => i === index ? { ...item, can_arrive_48h: e.target.checked } : item) })} />Can arrive in 48 h with crew and gear</label>
-            <label>Travel time (hours, optional)<input type="number" min={0} max={1000} step="any" value={candidate.travel_hours ?? ""} onChange={e => edit({ ...scenario, candidates: scenario.candidates.map((item, i) => i === index ? { ...item, travel_hours: e.target.value === "" ? undefined : Number(e.target.value) } : item) })} /></label>
-            <label>Booker notes (200 characters maximum)<textarea maxLength={200} value={candidate.notes} onChange={e => edit({ ...scenario, candidates: scenario.candidates.map((item, i) => i === index ? { ...item, notes: e.target.value } : item) })} /></label>
-          </div>
-          <button type="button" aria-label={`Remove candidate ${index + 1}`} onClick={() => edit({ ...scenario, candidates: scenario.candidates.filter((_, i) => i !== index) })}>Remove</button>
-        </fieldset>)}
-        <button type="button" disabled={scenario.candidates.length >= 12} onClick={() => edit({ ...scenario, candidates: [...scenario.candidates, { name: "", available: false, can_arrive_48h: false, notes: "" }] })}>Add candidate</button>
-      </fieldset>
-      <fieldset disabled={busy !== null}>
-        <legend>4 · Ticket types</legend>
-        {scenario.ticket_types.map((ticket, index) => <div className="row" key={index}><label>Ticket type {index + 1}<input required maxLength={200} value={ticket} onChange={e => edit({ ...scenario, ticket_types: scenario.ticket_types.map((item, i) => i === index ? e.target.value : item) })} /></label><button type="button" disabled={scenario.ticket_types.length <= 1} aria-label={`Remove ticket type ${index + 1}`} onClick={() => edit({ ...scenario, ticket_types: scenario.ticket_types.filter((_, i) => i !== index) })}>Remove</button></div>)}
-        <button type="button" disabled={scenario.ticket_types.length >= 12} onClick={() => edit({ ...scenario, ticket_types: [...scenario.ticket_types, ""] })}>Add ticket type</button>
-      </fieldset>
-      <div className="actions">
-        <button className="primary" type="submit" disabled={busy !== null}>Rescue with Qloo</button>
-        <button type="submit" disabled={busy !== null} onClick={e => { e.preventDefault(); if (e.currentTarget.form?.reportValidity()) void run("baseline"); }}>LLM only (no Qloo)</button>
-      </div>
+    <section className="hero" aria-labelledby="hero-title">
+      <div><p className="eyebrow"><span className="signal-dot" /> Cancellation response / {scenario.festival_name}</p><h1 id="hero-title">Keep the night{" "}<br /><em>on the bill.</em></h1><p className="hero-copy">One empty slot. A phone list you can actually book.{" "}<br />Find the audience fit, then rebuild the running order.</p></div>
+      <aside className="incident"><div className="split"><span className="eyebrow">Open slot</span><span className="chip danger">Cancelled</span></div><h2>{scenario.cancelled_act.name}</h2><p className="mono">{scenario.cancelled_act.slot}</p><div className="incident-footer"><span>{scenario.city}</span><span>{scenario.date}</span></div></aside>
+    </section>
+    <div className="source-bar"><div><span className={`chip ${status.qloo === "mock" ? "warning" : "good"}`}>{status.qloo === "mock" ? "Sample data" : "Live Qloo"}</span><span>{status.qloo === "mock" ? "Fictional acts · synthetic affinity" : "Real artist names · fictional festival and logistics"}</span></div><span className="mono">Planner / {status.llm === "mock" ? "deterministic sample" : "live LLM"}</span></div>
+    {statusError && <p className="notice">Status refresh unavailable. Showing the server’s initial mode; each result reports its actual source.</p>}
+    {status.qloo === "live" && <p className="notice">Artist availability, travel and commitments below are invented for this exercise. No artist booking is implied.</p>}
+    <section className="operations" aria-labelledby="order-title">
+      <div className="section-heading"><div><p className="eyebrow">01 / The situation</p><h2 id="order-title">Tonight’s running order</h2></div><a href="#scenario-editor" onClick={() => document.getElementById("scenario-editor")?.setAttribute("open", "")}>Edit scenario <span aria-hidden="true">↗</span></a></div>
+      <div className="timeline-grid">{runningOrder(scenario).map(group => <div className="stage" key={group.stage}><h3><span className="stage-light" />{group.stage}<span className="mono">STAGE</span></h3><ol className="timeline">{group.acts.map((act, index) => <li className={act.cancelled ? "cancelled" : ""} key={index}><span className="mono slot-time">{act.slot}</span><div>{act.cancelled ? <del>{act.name}</del> : <strong>{act.name}</strong>}{act.cancelled && <span className="chip danger">Slot to rebuild</span>}</div></li>)}</ol></div>)}</div>
+    </section>
+    <form onSubmit={event => { event.preventDefault(); void run("qloo"); }} onInvalid={event => { (event.target as HTMLElement).closest("details")?.setAttribute("open", ""); }} aria-describedby="privacy">
+      <section className="operations" aria-labelledby="phone-title"><div className="section-heading"><div><p className="eyebrow">02 / Feasibility first</p><h2 id="phone-title">The booker’s phone list</h2></div><span className="chip neutral">{filtered.eligible.length} eligible / {scenario.candidates.length} acts</span></div>
+        <div className="phone-grid">{scenario.candidates.map((act, i) => {
+          const excluded = filtered.excluded.find(item => item.name === act.name);
+          return <article className={`phone-card ${excluded ? "is-excluded" : ""}`} key={i}><div className="split"><span className="mono index">{String(i + 1).padStart(2, "0")}</span><span className={`chip ${excluded ? "danger" : "good"}`}>{excluded ? "Excluded" : "Eligible"}</span></div><h3>{act.name || "Unnamed act"}</h3><p>{excluded?.reason || `Available · crew + gear within 48 h${act.travel_hours !== undefined ? ` · ${act.travel_hours} h travel` : " · travel time unrecorded"}`}</p><p className="booker-note">{act.notes}</p></article>;
+        })}</div>
+        <ScenarioEditor scenario={scenario} edit={edit} busy={busy !== null} />
+      </section>
+      <div className="run-console"><div><span className="eyebrow">03 / Rebuild the night</span><p>Two audiences. One feasible shortlist.</p><small>Also tests promoting an act already on the bill.</small></div><div className="actions"><button className="primary" type="submit" disabled={busy !== null}>Rescue with Qloo <span aria-hidden="true">↗</span></button><button type="submit" disabled={busy !== null} onClick={event => { event.preventDefault(); if (event.currentTarget.form?.reportValidity()) void run("baseline"); }}>Compare with LLM-only</button></div></div>
+      <p id="privacy" className="privacy">Public act names only. No personal data. Notes go to the live language model, never to Qloo. Nothing is booked, sent or published.</p>
     </form>
-    <p role="status" aria-live="polite">{busy ? `Running ${busy === "qloo" ? "Qloo rescue" : "LLM-only comparison"}… Up to 50 seconds.` : Object.keys(results).length ? "Results ready. Run the other mode to compare." : "Ready to compare."}</p>
-    {error && <p role="alert" className="error">{error}</p>}
-    {results.qloo && results.baseline && <aside className="notice" aria-label="Comparison"><strong>Ranking comparison</strong><p>Qloo: {results.qloo.plans.map(p => p.promoted_act ?? p.replacement).join(" → ") || "No grounded plan"}</p><p>LLM only: {results.baseline.plans.map(p => p.promoted_act ?? p.replacement).join(" → ") || "No suggestion"}</p><p>{results.qloo.plans[0]?.replacement === results.baseline.plans[0]?.replacement ? "The first replacement agrees. Inspect the evidence; agreement alone does not validate the guess." : "The first replacement differs. Qloo uses observed taste evidence; LLM only has no audience measurements."}</p></aside>}
-    <div className="comparison">
-      {(["qloo", "baseline"] as const).map(mode => results[mode] && <ResultPanel key={results[mode].run_id} result={results[mode]} busy={busy !== null} resolutions={resolutions} choose={(name, id) => setResolutions(previous => ({ ...previous, [name]: id }))} rerun={() => void run(mode)} />)}
-    </div>
+    <div className={`progress ${busy ? "is-running" : ""}`} role="status" aria-live="polite" aria-atomic="true"><span className="signal-dot" /><span>{busy ? `${busy === "baseline" ? progress === 0 ? "LLM-only · Filtering the phone list" : "LLM-only · Drafting without audience evidence" : stages[progress]}… Up to 50 seconds per run.` : error ? "Run stopped. Your inputs are preserved." : results.qloo ? "Plans ready for review. No replacement is confirmed." : "Ready when you are."}</span>{busy && <small>Progress is a time-based guide, not a server trace. A comparison can take two runs.</small>}</div>
+    {error && <div role="alert" className="error"><strong>Could not complete the run</strong><p>{error}</p></div>}
+    <section aria-labelledby="results-title" aria-busy={busy !== null}>
+      <div className="section-heading"><div><p className="eyebrow">04 / Decision desk</p><h2 id="results-title" ref={resultAnchor} tabIndex={-1}>{results.baseline ? "Evidence beside the guess" : "Your rebuild options"}</h2></div>{results.qloo && !results.baseline && <span className="chip neutral">Compare to inspect the difference</span>}</div>
+      {!results.qloo && <div className="empty-state"><span className="empty-number" aria-hidden="true">—</span><h3>The slot is open. Start with the evidence.</h3><p>Run a rescue to see direct swaps, a promotion path and editable response drafts.</p></div>}
+      {!!differences.length && <aside className="comparison-summary" aria-label="Plan comparison"><strong>{differences.filter(row => row.status !== "same").length} of {differences.length} plan positions differ or lack a counterpart</strong><p>Compared in returned order, including both the promoted act and the fill. Agreement does not validate an ungrounded suggestion.</p></aside>}
+      <div className={`comparison ${results.baseline ? "two-up" : ""}`}>{(["qloo", "baseline"] as const).map(mode => results[mode] && <ResultPanel key={results[mode].run_id} result={results[mode]} differences={differences} busy={busy !== null} pendingChoices={mode === "qloo" && pendingChoices} resolutions={resolutions} choose={choose} rerun={() => void run("qloo")} />)}</div>
+    </section>
   </>;
-}
-function ResultPanel({ result, busy, resolutions, choose, rerun }: { result: RescueResponse; busy: boolean; resolutions: Record<string, string>; choose: (name: string, id: string) => void; rerun: () => void }) {
-  return <section className="result" aria-label={result.mode === "qloo" ? "Qloo rescue result" : "LLM-only result"}>
-    <h2>{result.mode === "qloo" ? "Qloo rescue" : "LLM only (no Qloo)"}</h2>
-    <p>{result.mode === "qloo" ? `Taste source: ${result.data_source}` : "No Qloo lookup or taste data"} · Planner: {result.llm}</p>
-    {result.data_source === "mock" && <p className="banner">Sample data</p>}
-    <h3>Excluded by hard constraints</h3>
-    {result.excluded.length ? <ul>{result.excluded.map(a => <li key={a.name}><strong>{a.name}</strong>: {a.reason}</li>)}</ul> : <p>None.</p>}
-    <h3>Needs input</h3>
-    {result.needs_input.length ? <div>{result.needs_input.map(a => <label key={a.name}>Choose the catalog match for {a.name}<select disabled={busy} value={resolutions[a.name] ?? ""} onChange={e => choose(a.name, e.target.value)}><option value="">Choose an act…</option>{a.options.map(o => <option value={o.entity_id} key={o.entity_id}>{o.label} · {o.entity_id}</option>)}</select></label>)}<button type="button" disabled={busy || !result.needs_input.some(a => resolutions[a.name])} onClick={rerun}>Re-run with selected matches</button></div> : <p>None.</p>}
-    <h3>Not in the Qloo catalog</h3>
-    {result.mode === "baseline" ? <p>Not checked in this mode.</p> : result.not_in_catalog.length ? <ul>{result.not_in_catalog.map(n => <li key={n}>{n} — not scored or guessed.</li>)}</ul> : <p>None.</p>}
-    <h3>Rebuild plans</h3>
-    {!result.plans.length && <p>No supported plan is available. Resolve names or update the phone list.</p>}
-    {result.plans.map(p => <article className="plan" key={p.id}><h4>{p.id} · {p.title}</h4><p><strong>{p.type === "direct_swap" ? "Direct replacement" : "Promote and fill"}</strong> · {p.promoted_act ? `${p.promoted_act} moves up; ${p.replacement} fills the freed slot.` : p.replacement}</p><p>{p.rationale}</p><dl><dt>Cancelled act’s audience</dt><dd>{p.evidence.fit_original_audience}</dd><dt>Lineup’s audience</dt><dd>{p.evidence.fit_lineup_audience}</dd><dt>Regional audience</dt><dd>{p.evidence.local_heat}</dd></dl><ul>{p.caveats.map((c, i) => <li key={i}>{c}</li>)}</ul></article>)}
-    <h3>Announcement drafts</h3><p>Edit these locally before using your official channels. Nothing is sent by this app.</p>
-    <label>Short social post<textarea defaultValue={result.announcement.short_post} rows={5} /></label>
-    <label>Email subject<input defaultValue={result.announcement.email_subject} /></label>
-    <label>Email to ticket holders<textarea defaultValue={result.announcement.email_body} rows={10} /></label>
-    <h3>Refund handling checklist</h3>{result.refund_checklist.map(t => <div key={t.ticket_type}><h4>{t.ticket_type}</h4><ul>{t.items.map((item, i) => <li key={i}>{item}</li>)}</ul></div>)}
-    <details><summary>Tool trace ({result.trace.length} calls)</summary><p>Entity IDs are shortened. Counts and latency describe this run’s tool results.</p><ol>{result.trace.map((t, i) => <li key={i}><strong>{t.tool}</strong> · {t.status} · {t.result_count} results · {t.ms} ms<pre>{JSON.stringify(t.params, null, 2)}</pre></li>)}</ol></details>
-    <h3>Limits and disclaimers</h3><ul>{result.disclaimers.map((d, i) => <li key={i}>{d}</li>)}</ul>
-  </section>;
 }

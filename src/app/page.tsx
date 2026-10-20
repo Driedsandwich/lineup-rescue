@@ -1,11 +1,11 @@
 import RescueForm from "./rescue-form";
-import { qlooMode } from "../lib/qloo";
-import { llmMode } from "../lib/agent/plans";
+import { providerStatus } from "../lib/status";
 
 export const dynamic = "force-dynamic";
 export default function Home() {
   return <main id="main">
-    <header><p className="eyebrow">Festival operations · decision support</p><h1>Encore Rescue</h1><p>One cancellation. A feasible phone list. Rebuild the night with audience evidence.</p></header>
-    <RescueForm sampleData={qlooMode() === "mock"} mockPlanner={llmMode() === "mock"} />
+    <header className="masthead"><a className="brand" href="#main"><span className="brand-mark" aria-hidden="true">er<span>↗</span></span><span>Encore Rescue<small>FESTIVAL NIGHT OPERATIONS</small></span></a><span className="chip neutral">Decision support · no bookings</span></header>
+    <RescueForm initialStatus={providerStatus()} />
+    <footer><span>Encore Rescue / Night operations</span><span>Aggregate taste evidence. Human decisions.</span></footer>
   </main>;
 }

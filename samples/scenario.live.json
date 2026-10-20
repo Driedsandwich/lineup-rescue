@@ -1,0 +1,20 @@
+{
+  "festival_name": "Limestone After Dark (fictional)",
+  "city": "Austin, TX",
+  "date": "2026-10-24",
+  "cancelled_act": { "name": "The Killers", "slot": "Main stage 21:00–22:30" },
+  "lineup": [
+    { "name": "Vampire Weekend", "stage": "Main", "slot": "19:15–20:15" },
+    { "name": "Khruangbin", "stage": "River", "slot": "18:00–19:00" },
+    { "name": "Spoon", "stage": "River", "slot": "20:00–21:00" }
+  ],
+  "candidates": [
+    { "name": "Phoenix", "available": true, "can_arrive_48h": true, "travel_hours": 4, "notes": "Fictional exercise: agent confirms crew; verify backline and fee." },
+    { "name": "Yeah Yeah Yeahs", "available": true, "can_arrive_48h": true, "travel_hours": 6, "notes": "Fictional exercise: hold offered; production rider needs review." },
+    { "name": "The National", "available": false, "can_arrive_48h": true, "travel_hours": 3, "notes": "Fictional exercise: existing commitment; exclude." },
+    { "name": "Tame Impala", "available": true, "can_arrive_48h": false, "travel_hours": 52, "notes": "Fictional exercise: crew and gear cannot arrive in time; exclude." },
+    { "name": "Cage the Elephant", "available": true, "can_arrive_48h": true, "travel_hours": 5, "notes": "Fictional exercise: arrival confirmed; check set length." },
+    { "name": "Young the Giant", "available": true, "can_arrive_48h": true, "notes": "Fictional exercise: arrival confirmed; travel duration not recorded." }
+  ],
+  "ticket_types": ["Single day", "Weekend pass", "VIP"]
+}
