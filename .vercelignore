@@ -1,0 +1,10 @@
+.ref/
+.cache/
+.npmrc
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+coverage/
+*.log
