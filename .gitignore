@@ -12,3 +12,6 @@ live-cache/
 .cache/
 *.tsbuildinfo
 .npmrc
+.vercel
+.env*
+!.env.example
