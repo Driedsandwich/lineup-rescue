@@ -70,7 +70,7 @@ it("degrades at the global daily env limit without consuming the denied IP's quo
     expect(response.headers.get("X-Result-Cache")).toBe("miss");
     expect(body.trace).toContainEqual(expect.objectContaining({ tool: "fallback", params: { reason: "daily_cap" } }));
     expect(body.trace.some(row => row.tool === "model_turn")).toBe(false);
-    expect(body.disclaimers.join(" ")).toContain("Global daily usage limit for the language model reached.");
+    expect(body.disclaimers.join(" ")).toContain("Daily usage limit for the language model reached on this server.");
     expect(body.disclaimers.join(" ")).toContain("no Qloo evidence was used");
   }
   expect(send).toHaveBeenCalledTimes(2);

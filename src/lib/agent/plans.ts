@@ -15,7 +15,7 @@ export function llmMode(): "live" | "mock" {
 export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode(), fallbackReason?: string): RescueResponse {
   const s = ctx.request.scenario;
   const fallbackNotice = fallbackReason === "ip_limit" ? "Per-IP usage limit for the language model reached."
-    : fallbackReason === "daily_cap" ? "Global daily usage limit for the language model reached."
+    : fallbackReason === "daily_cap" ? "Daily usage limit for the language model reached on this server."
     : fallbackReason === "deadline" ? "The language model time budget was reached."
     : "The language model did not complete an accepted plan.";
   return {
