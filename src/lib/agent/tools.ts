@@ -19,7 +19,7 @@ const descriptions: Record<ToolName, string> = {
   resolve_acts: "Resolve scenario act names only. Never guess ambiguous matches; ask the user to choose. Excluded acts cannot be queried.",
   rank_against_audience: "Rank only resolved eligible candidate or lineup IDs against resolved audience IDs in the scenario city. Returns bounded affinity evidence, not ticket forecasts.",
   local_heat: "Inspect a resolved eligible act's aggregate audience around the scenario city. Not availability or ticket sales.",
-  submit_rescue_plan: "Finish the run with the complete response contract. Server-owned metadata and trace are replaced with actual values. Use empty trace params objects. Only eligible replacements, no invented evidence or refund policy.",
+  submit_rescue_plan: "Submit decisions and draft copy only: up to 3 plans (rationale <= 600 characters, up to 4 caveats each <= 200), announcement (post <= 280, subject <= 120, body <= 1200), and one checklist per ticket type (up to 6 items each <= 200). The server supplies evidence, metadata, trace and disclaimers and fetches any missing evidence. Only eligible replacements; no invented refund policy.",
 };
 // Strict tool schemas reject string/number constraints and complex array constraints.
 // Strip them from what is sent; the zod schemas above still validate every input server-side.
@@ -34,8 +34,8 @@ export function strictSchema(schema: unknown): unknown {
     return [[key, strictSchema(value)]];
   }));
 }
-export function definitions(mode: RescueRequest["mode"]): Tool[] {
-  const names: ToolName[] = mode === "baseline" ? ["submit_rescue_plan"] : ["resolve_acts", "rank_against_audience", "local_heat", "submit_rescue_plan"];
+export function definitions(mode: RescueRequest["mode"], canResolve = true): Tool[] {
+  const names: ToolName[] = mode === "baseline" ? ["submit_rescue_plan"] : [...(canResolve ? ["resolve_acts" as const] : []), "rank_against_audience", "local_heat", "submit_rescue_plan"];
   return names.map(name => ({
     name, description: descriptions[name], strict: true,
     input_schema: strictSchema(z.toJSONSchema(toolSchemas[name], { target: "draft-7" })) as Tool.InputSchema,
@@ -64,13 +64,14 @@ export class ToolContext {
     }));
   }
   get notInCatalog() { return [...this.resolutions.values()].filter(r => r.status === "not_found").map(r => r.name); }
+  get canResolve() { return [...this.names].some(name => !this.resolutions.has(name)); }
   private known(id: string) { return [...this.resolved.values()].some(e => e.entity_id === id); }
   private redact(params: Record<string, unknown>): Record<string, unknown> {
     return Object.fromEntries(Object.entries(params).map(([key, value]) => [key,
       key.includes("id") ? (Array.isArray(value) ? value.map(id => `${String(id).slice(0, 8)}…`) : `${String(value).slice(0, 8)}…`) : value,
     ]));
   }
-  async execute(name: string, raw: unknown): Promise<ToolResult> {
+  async execute(name: string, raw: unknown, by?: "server"): Promise<ToolResult> {
     const start = performance.now();
     let params: Record<string, unknown> = {};
     let result: ToolResult;
@@ -114,9 +115,9 @@ export class ToolContext {
           const cancelled = this.resolved.get(this.request.scenario.cancelled_act.name)?.entity_id;
           if (options.includes(cancelled ?? "") || options.some(id => signals.includes(id))) throw new Error("Options must exclude cancelled act and signal acts");
           const ranking: Ranking = { options, signals, results: [] };
-          this.rankings.push(ranking);
           const entities = await this.qloo.rank(options, signals, input.city, this.signal);
           ranking.results = entities;
+          this.rankings.push(ranking);
           result = { status: entities.length ? "ok" : "empty", results: entities };
           break;
         }
@@ -124,7 +125,6 @@ export class ToolContext {
           const input = toolSchemas.local_heat.parse(raw);
           params = input;
           if (!this.known(input.entity_id) || input.region !== this.request.scenario.city) throw new Error("Use a resolved scenario ID and the scenario city");
-          this.heats.set(input.entity_id, []);
           const heat = await this.qloo.heat(input.entity_id, input.region, this.signal);
           this.heats.set(input.entity_id, heat);
           result = { status: heat.length ? "ok" : "empty", results: heat };
@@ -136,12 +136,16 @@ export class ToolContext {
       if (this.signal.aborted) throw error;
       result = { status: "error", results: [], error: error instanceof QlooError ? error.message : "Invalid tool request or unavailable data; do not infer missing evidence." };
     }
-    this.trace.push({ tool: name.slice(0, 200), params: this.redact(params), status: result.status, result_count: result.results.length, ms: Math.round(performance.now() - start) });
+    this.trace.push({ tool: name.slice(0, 200), params: { ...this.redact(params), ...(by ? { by } : {}) }, status: result.status, result_count: result.results.length, ms: Math.round(performance.now() - start) });
     return result;
   }
   ranking(id: string, signals: string[]): Entity | undefined {
     if (!signals.length) return;
     const key = [...signals].sort().join(",");
     return this.rankings.findLast(r => [...r.signals].sort().join(",") === key && r.options.includes(id))?.results.find(e => e.entity_id === id);
+  }
+  hasRanking(id: string, signals: string[]): boolean {
+    const key = [...signals].sort().join(",");
+    return this.rankings.some(r => r.options.includes(id) && [...r.signals].sort().join(",") === key);
   }
 }

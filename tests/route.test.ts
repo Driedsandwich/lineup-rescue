@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { POST } from "../src/app/api/rescue/route";
 import sample from "../samples/scenario.json";
 import { responseSchema } from "../src/lib/contracts";
@@ -11,6 +12,15 @@ it("runs both modes, caches normalised scenarios and keys resolutions separately
     const response = await POST(request({ mode, scenario: sample }, `route-${mode}`));
     expect(response.status).toBe(200);
     const body = responseSchema.parse(await response.json());
+    // Compare the actual HTTP response with the documented public contract,
+    // independently of the zod schema used by the server.
+    const spec = JSON.parse(readFileSync("docs/SPEC.md", "utf8").match(/Response:\n```json\n([\s\S]*?)\n```/)![1]);
+    expect(Object.keys(body).sort()).toEqual(Object.keys(spec).sort());
+    expect(Object.keys(body.plans[0]).sort()).toEqual(Object.keys(spec.plans[0]).sort());
+    expect(Object.keys(body.plans[0].evidence).sort()).toEqual(Object.keys(spec.plans[0].evidence).sort());
+    expect(Object.keys(body.announcement).sort()).toEqual(Object.keys(spec.announcement).sort());
+    expect(Object.keys(body.refund_checklist[0]).sort()).toEqual(Object.keys(spec.refund_checklist[0]).sort());
+    expect(Object.keys(body.trace[0]).sort()).toEqual(Object.keys(spec.trace[0]).sort());
     expect(body.mode).toBe(mode);
     expect(body.data_source).toBe("mock");
     expect(body.llm).toBe("mock");

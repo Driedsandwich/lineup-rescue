@@ -66,11 +66,23 @@ export const responseSchema = z.strictObject({
   trace: z.array(traceSchema).max(100),
   disclaimers: z.array(copy).max(12),
 });
-// Submitted trace params are server-owned. The server replaces these empty objects
-// with the actual redacted trace; this keeps every strict tool object closed.
-export const submissionSchema = responseSchema.extend({
-  trace: z.array(traceSchema.extend({ params: z.strictObject({}) })).max(100),
+// The model supplies decisions and draft copy only. All evidence and response
+// metadata belong to the server; the public response schema above stays stable.
+export const submissionSchema = z.strictObject({
+  plans: z.array(planSchema.omit({ evidence: true }).extend({
+    rationale: z.string().min(1).max(600),
+    caveats: z.array(z.string().min(1).max(200)).max(4),
+  })).max(3),
+  announcement: z.strictObject({
+    short_post: z.string().min(1).max(280),
+    email_subject: z.string().min(1).max(120),
+    email_body: z.string().min(1).max(1200),
+  }),
+  refund_checklist: z.array(z.strictObject({
+    ticket_type: text, items: z.array(z.string().min(1).max(200)).min(1).max(6),
+  })).max(12),
 });
+export type Submission = z.infer<typeof submissionSchema>;
 export type Scenario = z.infer<typeof scenarioSchema>;
 export type RescueRequest = z.infer<typeof requestSchema>;
 export type RescueResponse = z.infer<typeof responseSchema>;

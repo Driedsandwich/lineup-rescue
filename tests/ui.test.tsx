@@ -43,3 +43,17 @@ it("renders unknown evidence without a numeric meter and labels actual affinity 
   const measured = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "Qloo affinity 0.500 (not a probability)", baseline: false }));
   expect(measured).toContain('aria-label="Local heat: affinity 0.500, not a probability"');
 });
+
+it("distinguishes model-turn latency from server-initiated evidence calls in the trace", async () => {
+  const result = await runAgent({ mode: "baseline", scenario: sampleForMode("mock") }, new AbortController().signal);
+  result.trace = [
+    { tool: "model_turn", params: { turn: 2 }, status: "ok", result_count: 1, ms: 14000 },
+    { tool: "local_heat", params: { by: "server" }, status: "empty", result_count: 0, ms: 12 },
+  ];
+  const html = renderToStaticMarkup(createElement(ResultPanel, { result, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
+  expect(html).toContain("2 entries");
+  expect(html).toContain("Model turn 2");
+  expect(html).toContain("1 tool calls requested / 14000 ms");
+  expect(html).toContain("local_heat (server)");
+  expect(html).toContain("0 results / 12 ms");
+});

@@ -1,6 +1,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { responseSchema, type Plan, type RescueResponse } from "../contracts";
+import { ZodError } from "zod";
+import { responseSchema, submissionSchema, type Plan, type RescueResponse } from "../contracts";
 import type { ToolContext } from "./tools";
 
 export const DISCLAIMERS = [
@@ -34,45 +35,98 @@ export function envelope(ctx: ToolContext, plans: Plan[]): RescueResponse {
 function metric(value: number | null | undefined, sample: boolean) {
   return value == null ? "No affinity data available" : `${sample ? "Synthetic pseudo-affinity" : "Qloo affinity"} ${value.toFixed(3)} (not a probability)`;
 }
-/** Replace model evidence with observed results and constrain plans to the phone list. */
-export function finalise(ctx: ToolContext, raw: unknown): RescueResponse {
-  const submitted = responseSchema.parse(raw);
+export class SubmissionError extends Error {
+  constructor(message: string, readonly plan_id: string | null = null) {
+    super(message);
+    this.name = "SubmissionError";
+  }
+}
+
+function parseSubmission(raw: unknown) {
+  try { return submissionSchema.parse(raw); }
+  catch (error) {
+    if (!(error instanceof ZodError)) throw error;
+    const issue = error.issues[0];
+    const index = issue.path[0] === "plans" && typeof issue.path[1] === "number" ? issue.path[1] : undefined;
+    const plans = raw && typeof raw === "object" && "plans" in raw ? raw.plans : undefined;
+    const plan = Array.isArray(plans) && index !== undefined ? plans[index] : undefined;
+    throw new SubmissionError(`${issue.path.join(".") || "submission"}: ${issue.message}`, typeof plan?.id === "string" ? plan.id : null);
+  }
+}
+
+/** Validate decisions first, complete missing observations, then compose the public response. */
+export async function finalise(ctx: ToolContext, raw: unknown): Promise<RescueResponse> {
+  const submitted = parseSubmission(raw);
   const seen = new Set<string>();
-  const plans = submitted.plans.map(plan => {
-    if (seen.has(plan.id)) throw new Error("Plan IDs must be unique");
+  for (const plan of submitted.plans) {
+    const fail = (reason: string): never => { throw new SubmissionError(reason, plan.id); };
+    if (seen.has(plan.id)) fail("Plan IDs must be unique");
     seen.add(plan.id);
-    if (!ctx.filtered.eligible.some(a => a.name === plan.replacement)) throw new Error("Plan contains an ineligible replacement");
-    if (plan.type === "direct_swap" ? plan.promoted_act !== null : !ctx.request.scenario.lineup.some(a => a.name === plan.promoted_act)) throw new Error("Invalid promotion path");
-    if (ctx.request.mode === "baseline") return { ...plan, evidence: {
-      fit_original_audience: "LLM-only guess; no audience data.", fit_lineup_audience: "LLM-only guess; no audience data.", local_heat: "Not checked; no Qloo tools.",
-    }, caveats: [...plan.caveats, "Ungrounded suggestion; verify fit with the organiser."].slice(0, 12) };
+    if (!ctx.filtered.eligible.some(a => a.name === plan.replacement)) fail(`Ineligible replacement: ${plan.replacement}`);
+    if (plan.type === "direct_swap" && plan.promoted_act !== null) fail("Invalid promotion path: a direct swap requires promoted_act null");
+    if (plan.type === "promote_and_fill" && !ctx.request.scenario.lineup.some(a => a.name === plan.promoted_act)) fail(`Invalid promotion path: ${plan.promoted_act ?? "null"} is not an existing lineup act`);
+    if (ctx.request.mode === "qloo") {
+      for (const name of [ctx.request.scenario.cancelled_act.name, plan.replacement, ...(plan.promoted_act ? [plan.promoted_act] : [])]) {
+        if (!ctx.resolved.has(name)) fail(`Unresolved or unknown act: ${name}`);
+      }
+    }
+  }
+  const ticketTypes = submitted.refund_checklist.map(t => t.ticket_type);
+  if (ticketTypes.length !== ctx.request.scenario.ticket_types.length || new Set(ticketTypes).size !== ticketTypes.length || ticketTypes.some(t => !ctx.request.scenario.ticket_types.includes(t))) {
+    const missing = ctx.request.scenario.ticket_types.filter(t => !ticketTypes.includes(t));
+    const duplicates = [...new Set(ticketTypes.filter((t, i) => ticketTypes.indexOf(t) !== i))];
+    const unknown = ticketTypes.filter(t => !ctx.request.scenario.ticket_types.includes(t));
+    throw new SubmissionError(`Refund checklist must cover every supplied ticket type exactly once: ${JSON.stringify({ missing, duplicates, unknown })}`);
+  }
+
+  const prepared = submitted.plans.map(plan => {
     const original = ctx.resolved.get(ctx.request.scenario.cancelled_act.name)?.entity_id;
     const replacement = ctx.resolved.get(plan.replacement)?.entity_id;
     const promoted = plan.promoted_act ? ctx.resolved.get(plan.promoted_act)?.entity_id : undefined;
-    if (!original || !replacement || (plan.promoted_act && !promoted)) throw new Error("Unresolved or unknown acts cannot be planned or scored");
     const headliner = promoted ?? replacement;
-    const originalFit = ctx.ranking(headliner, [original]);
-    if (!originalFit) throw new Error("A Qloo-grounded plan requires observed original-audience ranking");
-    const lineupIds = ctx.request.scenario.lineup.flatMap(a => {
+    const lineupIds = [...new Set(ctx.request.scenario.lineup.flatMap(a => {
       const id = ctx.resolved.get(a.name)?.entity_id;
       return id && id !== headliner ? [id] : [];
-    });
-    const fillFit = promoted ? ctx.ranking(replacement, [promoted]) : undefined;
-    if (promoted && !fillFit) throw new Error("Promotion requires evidence for filling the freed slot");
-    if (lineupIds.length && !ctx.rankings.some(r => r.options.includes(replacement) && [...r.signals].sort().join(",") === [...lineupIds].sort().join(","))) throw new Error("Check replacement against the remaining lineup audience before submitting");
-    if (!ctx.heats.has(headliner) || !ctx.heats.has(replacement)) throw new Error("Check local heat for each finalist before submitting");
-    const heat = ctx.heats.get(headliner) ?? [];
+    }))];
+    return { plan, original, replacement, promoted, headliner, lineupIds };
+  });
+  if (ctx.request.mode === "qloo") {
+    // Group identical signal sets, deduplicate finalists, and fetch independent
+    // observations in parallel. An empty/error result stays unknown, never zero.
+    const rankings = new Map<string, { options: Set<string>; signals: string[] }>();
+    const heats = new Set<string>();
+    const needRank = (id: string, signals: string[]) => {
+      if (!signals.length || ctx.hasRanking(id, signals)) return;
+      const key = [...signals].sort().join(",");
+      const batch = rankings.get(key) ?? { options: new Set<string>(), signals };
+      batch.options.add(id);
+      rankings.set(key, batch);
+    };
+    for (const { original, replacement, promoted, headliner, lineupIds } of prepared) {
+      needRank(headliner!, [original!]);
+      needRank(replacement!, lineupIds);
+      if (promoted) needRank(replacement!, [promoted]);
+      for (const id of [headliner!, replacement!]) if (!ctx.heats.has(id)) heats.add(id);
+    }
+    await Promise.all([
+      ...[...rankings.values()].map(batch => ctx.execute("rank_against_audience", { option_ids: [...batch.options], signal_ids: batch.signals, city: ctx.request.scenario.city }, "server")),
+      ...[...heats].map(id => ctx.execute("local_heat", { entity_id: id, region: ctx.request.scenario.city }, "server")),
+    ]);
+  }
+  const plans: Plan[] = prepared.map(({ plan, original, replacement, promoted, headliner, lineupIds }) => {
+    if (ctx.request.mode === "baseline") return { ...plan, evidence: {
+      fit_original_audience: "LLM-only guess; no audience data.", fit_lineup_audience: "LLM-only guess; no audience data.", local_heat: "Not checked; no Qloo tools.",
+    }, caveats: [...plan.caveats, "Ungrounded suggestion; verify fit with the organiser."] };
+    const originalFit = ctx.ranking(headliner!, [original!]);
+    const fillFit = promoted ? ctx.ranking(replacement!, [promoted]) : undefined;
+    const heat = ctx.heats.get(headliner!) ?? [];
     const sample = ctx.qloo.source === "mock";
     return { ...plan, evidence: {
-      fit_original_audience: `${plan.promoted_act ?? plan.replacement}: ${metric(originalFit.affinity, sample)}${promoted ? `; ${plan.replacement} filling ${plan.promoted_act}'s slot: ${metric(fillFit?.affinity, sample)}` : ""}`,
-      fit_lineup_audience: `${plan.replacement}: ${metric(ctx.ranking(replacement, lineupIds)?.affinity, sample)}${ctx.request.scenario.lineup.length !== lineupIds.length + (promoted ? 1 : 0) ? "; only resolved lineup acts included" : ""}`,
+      fit_original_audience: `${plan.promoted_act ?? plan.replacement}: ${metric(originalFit?.affinity, sample)}${promoted ? `; ${plan.replacement} filling ${plan.promoted_act}'s slot: ${metric(fillFit?.affinity, sample)}` : ""}`,
+      fit_lineup_audience: `${plan.replacement}: ${metric(ctx.ranking(replacement!, lineupIds)?.affinity, sample)}${ctx.request.scenario.lineup.length !== lineupIds.length + (promoted ? 1 : 0) ? "; only resolved lineup acts included" : ""}`,
       local_heat: heat.length ? heat.map(h => `${h.label}: ${metric(h.affinity, sample)}`).join("; ") : "No local heat evidence available.",
-    }, caveats: [...plan.caveats, "Affinity is aggregate evidence, not a guarantee of audience response."].slice(0, 12) };
+    }, caveats: [...plan.caveats, "Affinity is aggregate evidence, not a guarantee of audience response."] };
   });
-  if (ctx.request.mode === "qloo" && [...ctx.names].some(n => !ctx.resolutions.has(n))) throw new Error("Resolve every eligible scenario act before submitting");
-  const ticketTypes = submitted.refund_checklist.map(t => t.ticket_type);
-  if (ticketTypes.length !== ctx.request.scenario.ticket_types.length || new Set(ticketTypes).size !== ticketTypes.length || ticketTypes.some(t => !ctx.request.scenario.ticket_types.includes(t))) throw new Error("Refund checklist must cover every supplied ticket type exactly once");
   ctx.trace.push({ tool: "submit_rescue_plan", params: { plan_count: plans.length }, status: plans.length ? "ok" : "empty", result_count: plans.length, ms: 0 });
-  const base = envelope(ctx, plans);
-  return responseSchema.parse({ ...base, announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
+  return responseSchema.parse({ ...envelope(ctx, plans), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
 }
