@@ -25,6 +25,11 @@ export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = 
   const sender: MessageSender = send ?? ((params, signal) => client!.messages.create(params, { signal }));
   const messages: MessageParam[] = [{ role: "user", content: JSON.stringify({
     scenario: ctx.request.scenario, eligible: ctx.filtered.eligible, excluded: ctx.filtered.excluded,
+    allowed_replacements: ctx.filtered.eligible.filter(a => ctx.request.mode === "baseline" || ctx.resolved.has(a.name)).map(a => a.name),
+    allowed_promotions: ctx.request.scenario.lineup.filter(a => ctx.request.mode === "baseline" || ctx.resolved.has(a.name)).map(a => a.name),
+    ticket_types: ctx.request.scenario.ticket_types,
+    cannot_be_used: { needs_input: ctx.needsInput.map(a => a.name), not_in_catalog: ctx.notInCatalog, excluded: ctx.filtered.excluded.map(a => a.name) },
+    planning_notice: "Copy replacement, promoted_act and ticket_type names exactly from allowed_replacements, allowed_promotions and ticket_types. Names under cannot_be_used cannot be used in plans. In baseline mode these are ungrounded options; no catalog lookup was performed.",
     resolved_ids: [...ctx.resolved].map(([name, entity]) => ({ name, entity_id: entity.entity_id })),
     resolutions: [...ctx.resolutions.values()],
     resolution_notice: "Resolved IDs are final. Do not resolve them again. Ambiguous names need the user; not-found names cannot be fixed by the model.",

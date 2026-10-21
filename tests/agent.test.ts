@@ -4,7 +4,7 @@ import sample from "../samples/scenario.json";
 import { requestSchema, responseSchema, type RescueRequest, type Submission } from "../src/lib/contracts";
 import { filterCandidates } from "../src/lib/agent/constraints";
 import { ToolContext, definitions } from "../src/lib/agent/tools";
-import { finalise } from "../src/lib/agent/plans";
+import { envelope, finalise } from "../src/lib/agent/plans";
 import { mockPlan } from "../src/lib/agent/mock";
 import { liveLoop, runAgent, type MessageSender } from "../src/lib/agent/loop";
 import { MockQloo } from "../src/lib/qloo/mock";
@@ -86,7 +86,9 @@ describe("hard constraints and grounded plan assembly", () => {
     const ctx = await resolved();
     const draft = await mockPlan(ctx);
     draft.plans[0].replacement = "Sample Glass Meadow";
-    await expect(finalise(ctx, draft)).rejects.toMatchObject({ message: "Ineligible replacement: Sample Glass Meadow", plan_id: draft.plans[0].id });
+    draft.plans = [draft.plans[0]];
+    await expect(finalise(ctx, draft)).rejects.toMatchObject({ message: "Ineligible replacement", plan_id: draft.plans[0].id });
+    expect(ctx.trace.at(-1)).toMatchObject({ tool: "submit_rescue_plan", status: "error", params: { reason: "Ineligible replacement", plan_id: draft.plans[0].id } });
     const fresh = await mockPlan(ctx);
     expect(fresh.plans[0]).not.toHaveProperty("evidence");
     expect((await finalise(ctx, fresh)).plans[0].evidence.fit_original_audience).toContain("Synthetic pseudo-affinity");
@@ -179,6 +181,82 @@ describe("hard constraints and grounded plan assembly", () => {
   });
 });
 describe("manual Anthropic loop", () => {
+  it.each([
+    { reason: "Ineligible replacement", plan: { ...direct, replacement: "Sample Glass Meadow" } },
+    { reason: "Invalid promotion path", plan: { ...promotion, promoted_act: direct.replacement } },
+    { reason: "Unresolved or unknown act: replacement", plan: { ...direct, replacement: "Sample Twin Lantern" } },
+    { reason: "plans.0.rationale:", plan: { ...direct, rationale: "x".repeat(601) } },
+  ])("accepts a valid sibling without another model turn after $reason", async ({ plan, reason }) => {
+    const ctx = await resolved();
+    const send = vi.fn<MessageSender>().mockResolvedValue(message("tool_use", [{ type: "tool_use", id: "partial", name: "submit_rescue_plan", input: submission([plan, { ...promotion, id: "keep-C" }]) }]));
+    const result = responseSchema.parse(await liveLoop(ctx, send));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result.plans.map(p => p.id)).toEqual(["keep-C"]);
+    expect(result.disclaimers).toContainEqual(expect.stringContaining(`One suggested plan was dropped: ${reason}`));
+    expect(result.trace).toContainEqual({ tool: "submit_rescue_plan", status: "error", params: { reason: expect.stringContaining(reason), plan_id: plan.id }, result_count: 0, ms: 0 });
+  });
+  it("keeps the first valid duplicate ID and records every rejected plan", async () => {
+    const ctx = await resolved();
+    const result = await finalise(ctx, submission([direct, direct, { ...promotion, replacement: "Sample Glass Meadow" }]));
+    expect(result.plans.map(p => p.id)).toEqual(["A"]);
+    expect(result.trace.filter(t => t.tool === "submit_rescue_plan" && t.status === "error").map(t => t.params)).toEqual([
+      { reason: "Plan IDs must be unique", plan_id: "A" }, { reason: "Ineligible replacement", plan_id: "B" },
+    ]);
+    expect(result.disclaimers.filter(s => s.startsWith("One suggested plan was dropped:"))).toHaveLength(2);
+  });
+  it("records all invalid plans before returning the first specific error", async () => {
+    const ctx = await resolved();
+    await expect(finalise(ctx, submission([{ ...direct, replacement: "Sample Glass Meadow" }, { ...promotion, promoted_act: null }]))).rejects.toMatchObject({ message: "Ineligible replacement", plan_id: "A" });
+    expect(ctx.trace.filter(t => t.tool === "submit_rescue_plan" && t.status === "error")).toHaveLength(2);
+    expect(ctx.rankings).toEqual([]);
+  });
+  it("records submission-wide schema errors without echoing unknown fields or draft copy", async () => {
+    const ctx = context("baseline");
+    await expect(finalise(ctx, { ...submission(), "Synthetic private field": "Synthetic private draft" })).rejects.toMatchObject({ plan_id: null });
+    const row = ctx.trace.at(-1)!;
+    expect(row).toEqual({ tool: "submit_rescue_plan", status: "error", params: { reason: "submission: Unexpected fields are not allowed", plan_id: null }, result_count: 0, ms: 0 });
+    expect(JSON.stringify(row)).not.toContain("Synthetic private");
+  });
+  it.each(["case", "whitespace", "missing", "duplicate", "unknown", "empty"])("normalises %s checklists without a model correction", async kind => {
+    const ctx = await resolved();
+    const draft = submission();
+    if (kind === "case") draft.refund_checklist[0].ticket_type = sample.ticket_types[0].toUpperCase();
+    if (kind === "whitespace") draft.refund_checklist[0].ticket_type = `  ${sample.ticket_types[0]}  `;
+    if (kind === "missing") draft.refund_checklist.pop();
+    if (kind === "duplicate") draft.refund_checklist[1] = { ticket_type: ` ${sample.ticket_types[0].toUpperCase()} `, items: ["Duplicate must be dropped."] };
+    if (kind === "unknown") draft.refund_checklist[1] = { ticket_type: "Synthetic unknown ticket", items: ["Unknown must be dropped."] };
+    if (kind === "empty") draft.refund_checklist = [];
+    const send = vi.fn<MessageSender>().mockResolvedValue(message("tool_use", [{ type: "tool_use", id: "normalise", name: "submit_rescue_plan", input: draft }]));
+    const result = responseSchema.parse(await liveLoop(ctx, send));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(result.refund_checklist.map(t => t.ticket_type)).toEqual(sample.ticket_types);
+    expect(result.refund_checklist[0].items).toEqual(kind === "empty" ? expect.arrayContaining([expect.stringContaining("Verify eligibility")]) : ["Verify the published terms."]);
+    for (const entry of result.refund_checklist) {
+      const supplied = draft.refund_checklist.find(t => t.ticket_type.trim().toLowerCase() === entry.ticket_type.toLowerCase());
+      if (!supplied) expect(entry.items).toEqual(envelope(ctx, []).refund_checklist.find(t => t.ticket_type === entry.ticket_type)!.items);
+    }
+    expect(JSON.stringify(result.refund_checklist)).not.toContain("must be dropped");
+    expect(result.trace.filter(t => t.tool === "submit_rescue_plan" && t.status === "error")).toEqual([]);
+    expect(result.trace).toContainEqual(expect.objectContaining({ tool: "submit_rescue_plan", status: "ok", params: { reason: expect.stringContaining("Refund checklist normalised"), plan_id: null } }));
+  });
+  it("keeps valid checklists unchanged without a normalisation row", async () => {
+    const result = await finalise(await resolved(), submission());
+    expect(result.refund_checklist).toEqual(submission().refund_checklist);
+    expect(result.trace.some(t => t.params.reason)).toBe(false);
+  });
+  it("provides all eligible names up front in baseline without catalog claims", async () => {
+    const ctx = context("baseline");
+    const send = vi.fn<MessageSender>().mockImplementation(async params => {
+      const first = JSON.parse(params.messages[0].content as string);
+      expect(first.allowed_replacements).toEqual(ctx.filtered.eligible.map(a => a.name));
+      expect(first.allowed_promotions).toEqual(sample.lineup.map(a => a.name));
+      expect(first.ticket_types).toEqual(sample.ticket_types);
+      expect(first.planning_notice).toContain("no catalog lookup was performed");
+      return message("tool_use", [{ type: "tool_use", id: "baseline", name: "submit_rescue_plan", input: submission() }]);
+    });
+    await liveLoop(ctx, send);
+    expect(ctx.resolved.size).toBe(0);
+  });
   it("uses exact SDK settings, preserves thinking blocks and re-prompts end_turn once", async () => {
     const ctx = context("baseline");
     const draft = await mockPlan(ctx);
@@ -211,6 +289,12 @@ describe("manual Anthropic loop", () => {
       const first = JSON.parse(params.messages[0].content as string);
       expect(first.resolved_ids).toContainEqual({ name: direct.replacement, entity_id: ctx.resolved.get(direct.replacement)!.entity_id });
       expect(first.resolution_notice).toContain("Resolved IDs are final");
+      expect(first.allowed_replacements).toEqual(ctx.filtered.eligible.filter(a => ctx.resolved.has(a.name)).map(a => a.name));
+      expect(first.allowed_promotions).toEqual(sample.lineup.map(a => a.name));
+      expect(first.ticket_types).toEqual(sample.ticket_types);
+      expect(first.cannot_be_used.needs_input).toEqual(["Sample Twin Lantern"]);
+      expect(first.cannot_be_used.not_in_catalog).toEqual(["Sample Unknown"]);
+      expect(first.planning_notice).toContain("Copy replacement, promoted_act and ticket_type names exactly");
       expect(first).not.toHaveProperty("server_envelope");
       expect(first.resolutions.some((r: { status: string }) => r.status === "ambiguous")).toBe(true);
       expect(first.resolutions.some((r: { status: string }) => r.status === "not_found")).toBe(true);
@@ -239,20 +323,13 @@ describe("manual Anthropic loop", () => {
     expect((await liveLoop(ctx, send)).plans).toHaveLength(1);
   });
   it.each([
-    { label: "duplicate IDs", plans: [direct, direct], reason: "Plan IDs must be unique", plan_id: "A" },
-    { label: "excluded replacement", plans: [{ ...direct, replacement: "Sample Glass Meadow" }], reason: "Ineligible replacement: Sample Glass Meadow", plan_id: "A" },
+    { label: "excluded replacement", plans: [{ ...direct, replacement: "Sample Glass Meadow" }], reason: "Ineligible replacement", plan_id: "A" },
     { label: "invalid promotion", plans: [{ ...promotion, promoted_act: direct.replacement }], reason: "Invalid promotion path", plan_id: "B" },
-    { label: "unresolved act", plans: [{ ...direct, replacement: "Sample Twin Lantern" }], reason: "Unresolved or unknown act: Sample Twin Lantern", plan_id: "A" },
-    { label: "duplicate ticket", plans: [direct], reason: "Refund checklist must cover every supplied ticket type exactly once", plan_id: null },
-    { label: "missing ticket", plans: [direct], reason: "Refund checklist must cover every supplied ticket type exactly once", plan_id: null },
-    { label: "unknown ticket", plans: [direct], reason: "Refund checklist must cover every supplied ticket type exactly once", plan_id: null },
+    { label: "unresolved act", plans: [{ ...direct, replacement: "Sample Twin Lantern" }], reason: "Unresolved or unknown act: replacement", plan_id: "A" },
     { label: "oversized rationale", plans: [{ ...direct, rationale: "x".repeat(601) }], reason: "plans.0.rationale:", plan_id: "A" },
-  ])("returns specific hard-error feedback for $label and accepts a corrected submission", async ({ label, plans, reason, plan_id }) => {
+  ])("returns specific hard-error feedback for $label and accepts a corrected submission", async ({ plans, reason, plan_id }) => {
     const ctx = await resolved();
     const invalid = submission(plans);
-    if (label === "duplicate ticket") invalid.refund_checklist[1] = invalid.refund_checklist[0];
-    if (label === "missing ticket") invalid.refund_checklist.pop();
-    if (label === "unknown ticket") invalid.refund_checklist[0].ticket_type = "Unknown ticket";
     const rank = vi.spyOn(ctx.qloo, "rank");
     const send = vi.fn<MessageSender>().mockResolvedValueOnce(message("tool_use", [{ type: "tool_use", id: "invalid", name: "submit_rescue_plan", input: invalid }]))
       .mockImplementationOnce(async params => {
@@ -264,7 +341,9 @@ describe("manual Anthropic loop", () => {
         expect(rank).not.toHaveBeenCalled();
         return message("tool_use", [{ type: "tool_use", id: "corrected", name: "submit_rescue_plan", input: submission() }]);
       });
-    expect((await liveLoop(ctx, send)).plans).toHaveLength(1);
+    const result = await liveLoop(ctx, send);
+    expect(result.plans).toHaveLength(1);
+    expect(result.trace).toContainEqual({ tool: "submit_rescue_plan", status: "error", params: { reason: expect.stringContaining(reason), plan_id }, result_count: 0, ms: 0 });
     expect(send).toHaveBeenCalledTimes(2);
   });
   it.each(["refusal", "max_tokens"] as const)("clearly errors on %s without fallback", async reason => {

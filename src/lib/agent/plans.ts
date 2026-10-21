@@ -1,7 +1,7 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { ZodError } from "zod";
-import { responseSchema, submissionSchema, type Plan, type RescueResponse } from "../contracts";
+import { z, ZodError } from "zod";
+import { responseSchema, submissionSchema, type Plan, type RescueResponse, type Submission } from "../contracts";
 import type { ToolContext } from "./tools";
 
 export const DISCLAIMERS = [
@@ -48,45 +48,80 @@ export class SubmissionError extends Error {
   }
 }
 
-function parseSubmission(raw: unknown) {
-  try { return submissionSchema.parse(raw); }
+// Keep the submission contract and its limits; validate each plan separately so
+// an invalid sibling cannot discard a usable plan.
+const submissionEnvelopeSchema = submissionSchema.extend({ plans: z.array(z.unknown()).max(3) });
+function validationError(error: ZodError, prefix: (string | number)[] = [], plan_id: string | null = null) {
+  const issue = error.issues[0];
+  const path = [...prefix, ...issue.path].join(".") || "submission";
+  // Unrecognised keys can contain arbitrary model/user text. Never echo them.
+  const reason = issue.code === "unrecognized_keys" ? "Unexpected fields are not allowed" : issue.message;
+  return new SubmissionError(`${path}: ${reason}`, plan_id);
+}
+function recordRejection(ctx: ToolContext, error: SubmissionError) {
+  ctx.trace.push({ tool: "submit_rescue_plan", status: "error", params: { reason: error.message, plan_id: error.plan_id }, result_count: 0, ms: 0 });
+}
+function parseSubmission(ctx: ToolContext, raw: unknown) {
+  try { return submissionEnvelopeSchema.parse(raw); }
   catch (error) {
     if (!(error instanceof ZodError)) throw error;
-    const issue = error.issues[0];
-    const index = issue.path[0] === "plans" && typeof issue.path[1] === "number" ? issue.path[1] : undefined;
-    const plans = raw && typeof raw === "object" && "plans" in raw ? raw.plans : undefined;
-    const plan = Array.isArray(plans) && index !== undefined ? plans[index] : undefined;
-    throw new SubmissionError(`${issue.path.join(".") || "submission"}: ${issue.message}`, typeof plan?.id === "string" ? plan.id : null);
+    const rejection = validationError(error);
+    recordRejection(ctx, rejection);
+    throw rejection;
   }
 }
 
 /** Validate decisions first, complete missing observations, then compose the public response. */
 export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode(), signal = ctx.signal, fallbackReason }: { llm?: RescueResponse["llm"]; signal?: AbortSignal; fallbackReason?: string } = {}): Promise<RescueResponse> {
   signal.throwIfAborted();
-  const submitted = parseSubmission(raw);
+  const submitted = parseSubmission(ctx, raw);
+  const valid: Submission["plans"] = [];
+  const rejected: SubmissionError[] = [];
   const seen = new Set<string>();
-  for (const plan of submitted.plans) {
+  for (const [index, input] of submitted.plans.entries()) {
+    const parsed = submissionSchema.shape.plans.element.safeParse(input);
+    if (!parsed.success) {
+      const id = input && typeof input === "object" && "id" in input && typeof input.id === "string" ? input.id.slice(0, 200) : null;
+      const error = validationError(parsed.error, ["plans", index], id);
+      recordRejection(ctx, error);
+      rejected.push(error);
+      continue;
+    }
+    const plan = parsed.data;
     const fail = (reason: string): never => { throw new SubmissionError(reason, plan.id); };
-    if (seen.has(plan.id)) fail("Plan IDs must be unique");
-    seen.add(plan.id);
-    if (!ctx.filtered.eligible.some(a => a.name === plan.replacement)) fail(`Ineligible replacement: ${plan.replacement}`);
-    if (plan.type === "direct_swap" && plan.promoted_act !== null) fail("Invalid promotion path: a direct swap requires promoted_act null");
-    if (plan.type === "promote_and_fill" && !ctx.request.scenario.lineup.some(a => a.name === plan.promoted_act)) fail(`Invalid promotion path: ${plan.promoted_act ?? "null"} is not an existing lineup act`);
-    if (ctx.request.mode === "qloo") {
-      for (const name of [ctx.request.scenario.cancelled_act.name, plan.replacement, ...(plan.promoted_act ? [plan.promoted_act] : [])]) {
-        if (!ctx.resolved.has(name)) fail(`Unresolved or unknown act: ${name}`);
+    try {
+      if (seen.has(plan.id)) fail("Plan IDs must be unique");
+      if (!ctx.filtered.eligible.some(a => a.name === plan.replacement)) fail("Ineligible replacement");
+      if (plan.type === "direct_swap" && plan.promoted_act !== null) fail("Invalid promotion path: a direct swap requires promoted_act null");
+      if (plan.type === "promote_and_fill" && !ctx.request.scenario.lineup.some(a => a.name === plan.promoted_act)) fail("Invalid promotion path: promoted_act is not an existing lineup act");
+      if (ctx.request.mode === "qloo") {
+        for (const [field, name] of [["cancelled_act", ctx.request.scenario.cancelled_act.name], ["replacement", plan.replacement], ...(plan.promoted_act ? [["promoted_act", plan.promoted_act]] : [])]) {
+          if (!ctx.resolved.has(name)) fail(`Unresolved or unknown act: ${field}`);
+        }
       }
+      seen.add(plan.id);
+      valid.push(plan);
+    } catch (error) {
+      if (!(error instanceof SubmissionError)) throw error;
+      recordRejection(ctx, error);
+      rejected.push(error);
     }
   }
-  const ticketTypes = submitted.refund_checklist.map(t => t.ticket_type);
-  if (ticketTypes.length !== ctx.request.scenario.ticket_types.length || new Set(ticketTypes).size !== ticketTypes.length || ticketTypes.some(t => !ctx.request.scenario.ticket_types.includes(t))) {
-    const missing = ctx.request.scenario.ticket_types.filter(t => !ticketTypes.includes(t));
-    const duplicates = [...new Set(ticketTypes.filter((t, i) => ticketTypes.indexOf(t) !== i))];
-    const unknown = ticketTypes.filter(t => !ctx.request.scenario.ticket_types.includes(t));
-    throw new SubmissionError(`Refund checklist must cover every supplied ticket type exactly once: ${JSON.stringify({ missing, duplicates, unknown })}`);
+  if (submitted.plans.length && !valid.length) throw rejected[0];
+
+  const defaults = envelope(ctx, []).refund_checklist;
+  const checklists = new Map<string, string[]>();
+  for (const entry of submitted.refund_checklist) {
+    const key = entry.ticket_type.trim().toLowerCase();
+    if (defaults.some(t => t.ticket_type.toLowerCase() === key) && !checklists.has(key)) checklists.set(key, entry.items);
+  }
+  const refund_checklist = defaults.map(entry => ({ ...entry, items: checklists.get(entry.ticket_type.toLowerCase()) ?? entry.items }));
+  // Compare to the raw checklist too: the schema already trims ticket strings.
+  if (JSON.stringify(refund_checklist) !== JSON.stringify((raw as Submission).refund_checklist)) {
+    ctx.trace.push({ tool: "submit_rescue_plan", status: "ok", params: { reason: "Refund checklist normalised: exact supplied ticket types, first match kept, server defaults for omissions", plan_id: null }, result_count: refund_checklist.length, ms: 0 });
   }
 
-  const prepared = submitted.plans.map(plan => {
+  const prepared = valid.map(plan => {
     const original = ctx.resolved.get(ctx.request.scenario.cancelled_act.name)?.entity_id;
     const replacement = ctx.resolved.get(plan.replacement)?.entity_id;
     const promoted = plan.promoted_act ? ctx.resolved.get(plan.promoted_act)?.entity_id : undefined;
@@ -136,5 +171,7 @@ export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode()
   });
   signal.throwIfAborted();
   ctx.trace.push({ tool: "submit_rescue_plan", params: { plan_count: plans.length }, status: plans.length ? "ok" : "empty", result_count: plans.length, ms: 0 });
-  return responseSchema.parse({ ...envelope(ctx, plans, llm, fallbackReason), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
+  const response = envelope(ctx, plans, llm, fallbackReason);
+  response.disclaimers.push(...rejected.map(error => `One suggested plan was dropped: ${error.message}`));
+  return responseSchema.parse({ ...response, announcement: submitted.announcement, refund_checklist });
 }

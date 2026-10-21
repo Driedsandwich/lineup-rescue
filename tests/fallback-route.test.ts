@@ -18,6 +18,31 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["partial", "corrected", "fallback"])("retains rejection details through the HTTP route with %s acceptance", async kind => {
+  const valid = {
+    id: "keep-C", title: "Synthetic direct swap", type: "direct_swap", replacement: sample.candidates[0].name,
+    promoted_act: null, rationale: "Verify production and fees.", caveats: ["Confirm timing."],
+  };
+  const invalid = { ...valid, id: "drop-A", replacement: "Sample Glass Meadow" };
+  const announcement = { short_post: "Programme under review.", email_subject: "Programme update", email_body: "Check official channels for confirmed changes." };
+  const submit = (entries: typeof valid[]) => ({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "submit", name: "submit_rescue_plan", input: { plans: entries, announcement, refund_checklist: [] } }] });
+  send.mockResolvedValueOnce(submit(kind === "partial" ? [invalid, valid] : [invalid]));
+  if (kind === "corrected") send.mockImplementationOnce(async params => {
+    expect(JSON.parse(params.messages.at(-1).content[0].content)).toEqual({ error: "Ineligible replacement", plan_id: "drop-A" });
+    return submit([valid]);
+  });
+  if (kind === "fallback") send.mockResolvedValueOnce({ stop_reason: "refusal", content: [] });
+  const response = await POST(request(`synthetic rejection ${kind}`));
+  expect(response.status).toBe(200);
+  const body = responseSchema.parse(await response.json());
+  expect(body.llm).toBe(kind === "fallback" ? "fallback" : "live");
+  expect(body.trace).toContainEqual({ tool: "submit_rescue_plan", status: "error", params: { reason: "Ineligible replacement", plan_id: "drop-A" }, result_count: 0, ms: 0 });
+  expect(send).toHaveBeenCalledTimes(kind === "partial" ? 1 : 2);
+  if (kind !== "fallback") expect(body.plans.map(p => p.id)).toEqual(["keep-C"]);
+  if (kind === "partial") expect(body.disclaimers).toContain("One suggested plan was dropped: Ineligible replacement");
+  expect(body.refund_checklist.map(t => t.ticket_type)).toEqual(sample.ticket_types);
+});
+
 it("returns HTTP 200 at the 40-second model deadline rather than a traceless 504", async () => {
   vi.useFakeTimers();
   send.mockImplementation(() => new Promise(() => {}));
