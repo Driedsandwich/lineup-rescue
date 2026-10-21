@@ -13,7 +13,9 @@ it("renders mode-aware running orders, accessible actions and the inline editor"
     expect(html).toContain("Compare with LLM-only");
     expect(html).toContain('id="scenario-editor"');
     expect(html).toContain("role=\"status\"");
-    expect(html).toContain(mode === "mock" ? "Sample data" : "No artist booking is implied");
+    const notice = "Fictional scenario for demonstration. Artist names are used only to look up public taste data; no real cancellation or booking is implied.";
+    expect(html.includes(notice)).toBe(mode === "live");
+    expect(html).toContain(mode === "mock" ? "Sample data" : "Live Qloo");
   }
 });
 
@@ -67,7 +69,7 @@ it("renders fallback as a calm status notice with plans and model timings", asyn
     expect(result.llm).toBe("fallback");
     expect(html).toContain('class="notice" role="status"');
     expect(html).toContain("Plans assembled with fixed rules.");
-    expect(html).toContain(mode === "qloo" ? "These plans use the same Qloo evidence." : "without Qloo evidence.");
+    expect(html).toContain(mode === "qloo" ? "assembled by fixed rules from the same Qloo evidence." : "no Qloo evidence was used.");
     expect(html).toContain("Planner / fallback");
     expect(html).toContain("Model turn 1");
     expect(html).toContain("PLAN 01");

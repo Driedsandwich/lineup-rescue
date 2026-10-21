@@ -12,8 +12,12 @@ export const DISCLAIMERS = [
 export function llmMode(): "live" | "mock" {
   return !process.env.ANTHROPIC_API_KEY || process.env.LLM_MODE === "mock" ? "mock" : "live";
 }
-export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode()): RescueResponse {
+export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode(), fallbackReason?: string): RescueResponse {
   const s = ctx.request.scenario;
+  const fallbackNotice = fallbackReason === "ip_limit" ? "Per-IP usage limit for the language model reached."
+    : fallbackReason === "daily_cap" ? "Global daily usage limit for the language model reached."
+    : fallbackReason === "deadline" ? "The language model time budget was reached."
+    : "The language model did not complete an accepted plan.";
   return {
     run_id: randomUUID(), mode: ctx.request.mode, data_source: ctx.qloo.source, llm,
     excluded: ctx.filtered.excluded, needs_input: ctx.needsInput, not_in_catalog: ctx.notInCatalog, plans,
@@ -30,7 +34,7 @@ export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["l
     ] })),
     trace: [...ctx.trace],
     disclaimers: [...DISCLAIMERS, ...(ctx.qloo.source === "mock" ? ["Sample data: fictional acts and synthetic pseudo-affinity; these are not live Qloo results."] : []), ...(ctx.request.mode === "baseline" ? ["Ungrounded suggestions; no Qloo catalog lookup or audience scoring was performed."] : []), ...(llm === "fallback" ? [
-      `The language model did not complete an accepted plan. These plans were assembled by fixed rules from ${ctx.request.mode === "baseline" ? "the same scenario and hard constraints; no Qloo evidence was used" : "the same Qloo evidence"}.`,
+      `${fallbackNotice} These plans were assembled by fixed rules from ${ctx.request.mode === "baseline" ? "the same scenario and hard constraints; no Qloo evidence was used" : "the same Qloo evidence"}.`,
     ] : [])],
   };
 }
@@ -57,7 +61,7 @@ function parseSubmission(raw: unknown) {
 }
 
 /** Validate decisions first, complete missing observations, then compose the public response. */
-export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode(), signal = ctx.signal }: { llm?: RescueResponse["llm"]; signal?: AbortSignal } = {}): Promise<RescueResponse> {
+export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode(), signal = ctx.signal, fallbackReason }: { llm?: RescueResponse["llm"]; signal?: AbortSignal; fallbackReason?: string } = {}): Promise<RescueResponse> {
   signal.throwIfAborted();
   const submitted = parseSubmission(raw);
   const seen = new Set<string>();
@@ -132,5 +136,5 @@ export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode()
   });
   signal.throwIfAborted();
   ctx.trace.push({ tool: "submit_rescue_plan", params: { plan_count: plans.length }, status: plans.length ? "ok" : "empty", result_count: plans.length, ms: 0 });
-  return responseSchema.parse({ ...envelope(ctx, plans, llm), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
+  return responseSchema.parse({ ...envelope(ctx, plans, llm, fallbackReason), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
 }

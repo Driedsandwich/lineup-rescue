@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Message, MessageParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import type { RescueRequest, Trace } from "../contracts";
 import { abortable } from "../abort";
+import type { ModelReservation } from "../limits";
 import { createQloo } from "../qloo";
 import { definitions, ToolContext } from "./tools";
 import { finalise, llmMode, SubmissionError } from "./plans";
@@ -88,7 +89,7 @@ export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = 
   throw new AgentError("unfinished", "The agent reached its eight-turn limit without submitting a plan.");
 }
 export const MODEL_BUDGET_MS = 40_000;
-type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number };
+type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number; reserveModel?: () => ModelReservation };
 export async function runAgent(request: RescueRequest, signal: AbortSignal, options: RunOptions = {}) {
   const trace = options.trace ?? [];
   const start = options.startedAt ?? performance.now();
@@ -104,18 +105,29 @@ export async function runAgent(request: RescueRequest, signal: AbortSignal, opti
     // Body reading and pre-resolution count against the 40-second budget too,
     // leaving the remainder of the request deadline for deterministic assembly.
     const remaining = Math.max(0, (options.modelBudgetMs ?? MODEL_BUDGET_MS) - (performance.now() - start));
+    const fallback = async (reason: string, budget = true) => {
+      ctx.trace.push({ tool: "fallback", params: { reason, ...(budget ? { budget_ms: options.modelBudgetMs ?? MODEL_BUDGET_MS } : {}) }, status: "ok", result_count: 0, ms: 0 });
+      return finalise(ctx, await mockPlan(ctx), { llm: "fallback", fallbackReason: reason });
+    };
+    signal.throwIfAborted();
+    if (!remaining) return await fallback("deadline");
+    const reservation = options.reserveModel?.();
+    if (reservation && "reason" in reservation) return await fallback(reservation.reason, false);
     const timer = setTimeout(() => model.abort(), remaining);
-    if (!remaining) model.abort();
+    let counted = false;
     try {
-      return await liveLoop(ctx, options.send, modelSignal);
+      const result = await liveLoop(ctx, options.send, modelSignal);
+      signal.throwIfAborted();
+      counted = true;
+      return result;
     } catch (error) {
+      reservation?.finish(false);
       signal.throwIfAborted();
       if (!(error instanceof AgentError) && !modelSignal.aborted) throw error;
       model.abort();
       clearTimeout(timer);
-      ctx.trace.push({ tool: "fallback", params: { reason: error instanceof AgentError ? error.code : "deadline", budget_ms: options.modelBudgetMs ?? MODEL_BUDGET_MS }, status: "ok", result_count: 0, ms: 0 });
-      return await finalise(ctx, await mockPlan(ctx), { llm: "fallback" });
-    } finally { clearTimeout(timer); }
+      return await fallback(error instanceof AgentError ? error.code : "deadline");
+    } finally { clearTimeout(timer); reservation?.finish(counted); }
   } catch (error) {
     const safe = error instanceof AgentError ? error : signal.aborted
       ? new AgentError("deadline", "The 50-second request deadline was reached.")

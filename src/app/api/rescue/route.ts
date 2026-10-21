@@ -60,7 +60,6 @@ export async function POST(request: Request) {
     const input = parsed.data;
     // The deployment proxy must replace forwarded headers, not append untrusted values.
     const ip = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
-    if (!limiter.checkIp(hash(ip))) return failure({ error: "rate_limit", message: "Limit: 5 runs per IP per 10 minutes." }, 429, { "Retry-After": "600" });
     const key = hash(stable({ ...input, resolutions: input.resolutions ?? {}, qloo: qlooMode(), llm: llmMode(), base: process.env.QLOO_BASE_URL ?? "https://hackathon.api.qloo.com" }));
     const cached = results.get(key);
     if (cached) return json(cached, 200, { "X-Result-Cache": "hit" });
@@ -69,8 +68,7 @@ export async function POST(request: Request) {
       trace = existing.trace;
       return json(await Promise.race([existing.run, aborted]), 200, { "X-Result-Cache": "shared" });
     }
-    if (!limiter.takeDaily()) return failure({ error: "daily_cap", message: "The server's 300-run UTC daily cap has been reached." }, 429);
-    const run = runAgent(input, controller.signal, { trace, startedAt: start }).then(result => {
+    const run = runAgent(input, controller.signal, { trace, startedAt: start, reserveModel: () => limiter.reserve(hash(ip)) }).then(result => {
       controller.signal.throwIfAborted();
       if (result.llm !== "fallback") results.set(key, result);
       return result;
@@ -90,7 +88,7 @@ export async function POST(request: Request) {
     if (controller.signal.aborted) return failure({ error: "deadline", message: "The 50-second deadline was reached." }, 504);
     if (error instanceof SyntaxError) return failure({ error: "invalid_json", message: "Send a valid JSON request body." }, 400);
     if (error instanceof Error && error.message === "body_json") return failure({ error: "invalid_json", message: "Send a valid JSON request body." }, 400);
-    if (error instanceof Error && error.message === "body_size") return failure({ error: "body_too_large", message: "Request body exceeds 64 KiB." }, 413);
+    if (error instanceof Error && error.message === "body_size") return failure({ error: "body_too_large", message: "Request body exceeds 64 KiB." }, 400);
     return failure({ error: "run_failed", message: "The rescue could not be completed. Review inputs and server configuration." }, 502);
   } finally {
     clearTimeout(timer);

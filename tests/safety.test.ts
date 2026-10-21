@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RunLimiter } from "../src/lib/limits";
 import { requestSchema } from "../src/lib/contracts";
 import sample from "../samples/scenario.json";
@@ -43,21 +43,65 @@ describe("fixture and server boundary guards", () => {
   });
 });
 describe("abuse limits", () => {
-  it("allows five per IP, isolates IPs and resets after ten minutes", () => {
+  function count(limiter: RunLimiter, ip: string) {
+    const reservation = limiter.reserve(ip);
+    if ("reason" in reservation) return reservation.reason;
+    reservation.finish(true);
+    return "live";
+  }
+  it("allows 20 live runs per IP, isolates IPs and resets after ten minutes", () => {
     let now = 0;
     const limiter = new RunLimiter(() => now);
-    expect(Array.from({ length: 6 }, () => limiter.checkIp("synthetic-ip"))).toEqual([true, true, true, true, true, false]);
-    expect(limiter.checkIp("other-ip")).toBe(true);
+    for (let i = 0; i < 20; i++) expect(count(limiter, "synthetic-ip")).toBe("live");
+    expect(count(limiter, "synthetic-ip")).toBe("ip_limit");
+    expect(count(limiter, "other-ip")).toBe("live");
     now = 600_000;
-    expect(limiter.checkIp("synthetic-ip")).toBe(true);
+    expect(count(limiter, "synthetic-ip")).toBe("live");
   });
-  it("caps global spend at 300 runs per UTC day", () => {
+  it("caps global live runs at 1,500 per UTC day", () => {
     let now = 0;
     const limiter = new RunLimiter(() => now);
-    for (let i = 0; i < 300; i++) expect(limiter.takeDaily()).toBe(true);
-    expect(limiter.takeDaily()).toBe(false);
+    for (let i = 0; i < 1_500; i++) expect(count(limiter, `ip-${i}`)).toBe("live");
+    expect(count(limiter, "another-ip")).toBe("daily_cap");
     now = 86_400_000;
-    expect(limiter.takeDaily()).toBe(true);
+    expect(count(limiter, "another-ip")).toBe("live");
+  });
+  it("uses positive integer environment overrides, falling back to defaults for invalid values", () => {
+    vi.stubEnv("LLM_RUNS_PER_IP", "2");
+    vi.stubEnv("LLM_RUNS_PER_DAY", "3");
+    const limiter = new RunLimiter();
+    expect(count(limiter, "a")).toBe("live");
+    expect(count(limiter, "a")).toBe("live");
+    expect(count(limiter, "a")).toBe("ip_limit");
+    expect(count(limiter, "b")).toBe("live");
+    expect(count(limiter, "c")).toBe("daily_cap");
+    for (const value of ["", "0", "-1", "1.5", "no", "Infinity", "9007199254740992"]) {
+      vi.stubEnv("LLM_RUNS_PER_IP", value);
+      vi.stubEnv("LLM_RUNS_PER_DAY", value);
+      const defaults = new RunLimiter();
+      for (let i = 0; i < 20; i++) expect(count(defaults, "a")).toBe("live");
+      expect(count(defaults, "a")).toBe("ip_limit");
+      for (let i = 20; i < 1_500; i++) expect(count(defaults, `ip-${i}`)).toBe("live");
+      expect(count(defaults, "b")).toBe("daily_cap");
+    }
+  });
+  it("reserves atomically and releases fallbacks exactly once without touching reset buckets", () => {
+    let now = 0;
+    const limiter = new RunLimiter(() => now, 1, 2);
+    const first = limiter.reserve("a");
+    if (!("finish" in first)) throw new Error("Expected reservation");
+    expect(count(limiter, "a")).toBe("ip_limit");
+    expect(count(limiter, "b")).toBe("live"); // denied IP attempt did not consume daily quota
+    first.finish(false);
+    first.finish(false);
+    const retry = limiter.reserve("a");
+    if (!("finish" in retry)) throw new Error("Expected reservation");
+    now = 86_400_000;
+    expect(count(limiter, "a")).toBe("live");
+    retry.finish(false);
+    expect(count(limiter, "a")).toBe("ip_limit");
+    expect(count(limiter, "b")).toBe("live");
+    expect(count(limiter, "c")).toBe("daily_cap");
   });
 });
 describe("input contract", () => {

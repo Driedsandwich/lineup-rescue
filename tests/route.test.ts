@@ -36,13 +36,18 @@ it("validates before running and returns safe errors for malformed and oversized
   expect((await POST(request({ mode: "qloo", scenario: {} }, "invalid"))).status).toBe(400);
   expect((await POST(new Request("http://localhost", { method: "POST", body: "invalid json" }))).status).toBe(400);
   expect((await POST(new Request("http://localhost", { method: "POST" }))).status).toBe(400);
-  expect((await POST(new Request("http://localhost", { method: "POST", body: "x".repeat(65_537) }))).status).toBe(413);
+  expect((await POST(new Request("http://localhost", { method: "POST", body: "x".repeat(65_537) }))).status).toBe(400);
+  const oversizedHeader = await POST(new Request("http://localhost", { method: "POST", headers: { "Content-Length": "65537" }, body: "{}" }));
+  expect(oversizedHeader.status).toBe(400);
+  expect((await oversizedHeader.json()).error).toBe("body_too_large");
 });
-it("rate-limits even cached requests", async () => {
-  for (let i = 0; i < 5; i++) expect((await POST(request({ mode: "baseline", scenario: sample }, "limit-ip"))).status).toBe(200);
-  const limited = await POST(request({ mode: "baseline", scenario: sample }, "limit-ip"));
-  expect(limited.status).toBe(429);
-  expect(limited.headers.get("Retry-After")).toBe("600");
+it("serves cached requests without a usage restriction", async () => {
+  for (let i = 0; i < 25; i++) {
+    const response = await POST(request({ mode: "baseline", scenario: sample }, "limit-ip"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("X-Result-Cache")).toBe("hit");
+    expect(response.headers.get("Retry-After")).toBeNull();
+  }
 });
 it("enforces the 50-second deadline even on a stalled request body", async () => {
   vi.useFakeTimers();
