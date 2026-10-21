@@ -20,7 +20,7 @@ If Qloo tools are absent, make explicitly ungrounded LLM-only suggestions from e
 Finish by calling submit_rescue_plan with ONLY plans, announcement and refund_checklist. Do not write evidence, metadata, trace or disclaimers; the server owns them. Use at most 3 plans, rationale <= 600 characters, at most 4 caveats each <= 200 characters. Draft a short social post <= 280 characters, email subject <= 120 and email body <= 1200; no unconfirmed booking claims. Provide one checklist for every ticket type, at most 6 items each <= 200 characters: what the organiser must verify/decide, never an invented refund policy. Include caveats about fees, riders, timing and aggregate evidence. Do not predict availability, fees or ticket sales. Do not output only prose: call submit_rescue_plan.`;
 
 export type MessageSender = (params: Anthropic.MessageCreateParamsNonStreaming, signal: AbortSignal) => Promise<Message>;
-export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = ctx.signal) {
+export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = ctx.signal, onSend = () => {}) {
   const client = send ? undefined : new Anthropic({ maxRetries: 0, timeout: 50_000 });
   const sender: MessageSender = send ?? ((params, signal) => client!.messages.create(params, { signal }));
   const messages: MessageParam[] = [{ role: "user", content: JSON.stringify({
@@ -41,6 +41,8 @@ export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = 
     const tools = definitions(ctx.request.mode, ctx.canResolve);
     const start = performance.now();
     try {
+      signal.throwIfAborted();
+      onSend();
       response = await abortable(sender({ model: "claude-haiku-5-5", max_tokens: 16000, output_config: { effort: "medium" }, system: SYSTEM_PROMPT,
         tools, tool_choice: { type: "auto" }, messages }, signal), signal);
       signal.throwIfAborted();
@@ -94,13 +96,20 @@ export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = 
   throw new AgentError("unfinished", "The agent reached its eight-turn limit without submitting a plan.");
 }
 export const MODEL_BUDGET_MS = 40_000;
-type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number; reserveModel?: () => ModelReservation };
+type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number; reserveModel?: () => ModelReservation; reserveQloo?: () => boolean };
 export async function runAgent(request: RescueRequest, signal: AbortSignal, options: RunOptions = {}) {
   const trace = options.trace ?? [];
   const start = options.startedAt ?? performance.now();
   try {
     const ctx = new ToolContext(request, createQloo(), signal, trace);
+    signal.throwIfAborted();
     if (request.mode === "qloo") {
+      if (ctx.qloo.source === "live" && options.reserveQloo && !options.reserveQloo()) {
+        const baseline = new ToolContext({ ...request, mode: "baseline" }, ctx.qloo, signal, trace);
+        trace.push({ tool: "fallback", params: { reason: "qloo_limit" }, status: "ok", result_count: 0, ms: 0 });
+        const result = await finalise(baseline, await mockPlan(baseline), { llm: "fallback", fallbackReason: "qloo_limit" });
+        return { ...result, mode: request.mode };
+      }
       const result = await ctx.execute("resolve_acts", { names: [...ctx.names] }, "server");
       if (result.status === "error") throw new AgentError("provider", "Qloo lookup failed. Check API access or use explicit mock mode; no synthetic fallback was used.");
     }
@@ -121,12 +130,10 @@ export async function runAgent(request: RescueRequest, signal: AbortSignal, opti
     const timer = setTimeout(() => model.abort(), remaining);
     let counted = false;
     try {
-      const result = await liveLoop(ctx, options.send, modelSignal);
+      const result = await liveLoop(ctx, options.send, modelSignal, () => { counted = true; });
       signal.throwIfAborted();
-      counted = true;
       return result;
     } catch (error) {
-      reservation?.finish(false);
       signal.throwIfAborted();
       if (!(error instanceof AgentError) && !modelSignal.aborted) throw error;
       model.abort();

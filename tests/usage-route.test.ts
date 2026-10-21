@@ -96,22 +96,22 @@ it("ignores cache hits for both counters and still serves cached live results af
   expect(send).toHaveBeenCalledTimes(3);
 });
 
-it("releases provider and time-budget fallbacks so the next real model run can use the slot", async () => {
+it.each(["provider", "deadline"])("keeps a sent %s attempt counted on both model counters", async reason => {
   vi.stubEnv("LLM_RUNS_PER_IP", "1");
   vi.stubEnv("LLM_RUNS_PER_DAY", "1");
-  send.mockRejectedValueOnce(new Error("synthetic failure"));
-  expect((await post("provider fallback")).body.llm).toBe("fallback");
-  vi.useFakeTimers();
-  send.mockImplementationOnce(() => new Promise(() => {}));
-  const timed = post("time fallback");
-  await vi.advanceTimersByTimeAsync(40_000);
-  const { body } = await timed;
+  if (reason === "provider") send.mockRejectedValueOnce(new Error("synthetic failure"));
+  else {
+    vi.useFakeTimers();
+    send.mockImplementationOnce(() => new Promise(() => {}));
+  }
+  const run = post("sent fallback");
+  if (reason === "deadline") await vi.advanceTimersByTimeAsync(40_000);
+  const { body } = await run;
   expect(body.llm).toBe("fallback");
-  expect(body.disclaimers.join(" ")).toContain("The language model time budget was reached.");
-  expect(body.trace).toContainEqual(expect.objectContaining({ tool: "fallback", params: expect.objectContaining({ reason: "deadline" }) }));
-  expect((await post("accepted")).body.llm).toBe("live");
+  expect(body.trace).toContainEqual(expect.objectContaining({ tool: "fallback", params: expect.objectContaining({ reason }) }));
   expect((await post("now limited")).body.llm).toBe("fallback");
-  expect(send).toHaveBeenCalledTimes(3);
+  expect((await post("other IP", "other")).body.trace).toContainEqual(expect.objectContaining({ tool: "fallback", params: { reason: "daily_cap" } }));
+  expect(send).toHaveBeenCalledTimes(1);
 });
 
 it("reserves in-flight model work and shares identical requests without counting twice", async () => {

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { requestSchema, type RescueResponse, type Trace } from "../../../lib/contracts";
 import { LruCache } from "../../../lib/cache";
-import { RunLimiter } from "../../../lib/limits";
+import { RunLimiter, QlooRunLimiter } from "../../../lib/limits";
+import { clientKey } from "../../../lib/client-key";
 import { runAgent, AgentError } from "../../../lib/agent/loop";
 import { llmMode } from "../../../lib/agent/plans";
 import { qlooMode } from "../../../lib/qloo";
@@ -9,6 +10,7 @@ import { qlooMode } from "../../../lib/qloo";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 const limiter = new RunLimiter();
+const qlooLimiter = new QlooRunLimiter();
 const results = new LruCache<RescueResponse>(100);
 const pending = new Map<string, { run: Promise<RescueResponse>; trace: Trace[] }>();
 function stable(value: unknown): string {
@@ -68,7 +70,9 @@ export async function POST(request: Request) {
       trace = existing.trace;
       return json(await Promise.race([existing.run, aborted]), 200, { "X-Result-Cache": "shared" });
     }
-    const run = runAgent(input, controller.signal, { trace, startedAt: start, reserveModel: () => limiter.reserve(hash(ip)) }).then(result => {
+    const ipKey = clientKey(ip);
+    const run = runAgent(input, controller.signal, { trace, startedAt: start,
+      reserveQloo: () => qlooLimiter.reserve(ipKey), reserveModel: () => limiter.reserve(ipKey) }).then(result => {
       controller.signal.throwIfAborted();
       if (result.llm !== "fallback") results.set(key, result);
       return result;

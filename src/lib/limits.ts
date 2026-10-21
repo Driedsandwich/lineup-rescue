@@ -3,6 +3,10 @@ import "server-only";
 export type UsageLimitReason = "ip_limit" | "daily_cap";
 export type ModelReservation = { reason: UsageLimitReason } | { finish: (counted: boolean) => void };
 type Counter = { start: number; count: number };
+const MAX_KEYS = 10_000;
+function evictOldest<T>(table: Map<string, T>) {
+  if (table.size >= MAX_KEYS) table.delete(table.keys().next().value!);
+}
 function positiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -15,7 +19,8 @@ export class RunLimiter {
     private perDay = positiveInteger(process.env.LLM_RUNS_PER_DAY, 1_500)) {}
 
   // Reserve both counters atomically immediately before live model work. Keep
-  // successful runs only; fallback/error releases the slot, even across resets.
+  // every run that sent a model request, including fallback/error/abort. Release
+  // only if nothing was sent; captured buckets keep releases safe across resets.
   reserve(ipHash: string): ModelReservation {
     const now = this.now();
     for (const [ip, item] of this.ips) if (now - item.start >= 600_000) this.ips.delete(ip);
@@ -24,7 +29,7 @@ export class RunLimiter {
     if (this.daily.count >= this.perDay) return { reason: "daily_cap" };
     let item = this.ips.get(ipHash);
     if (!item) {
-      if (this.ips.size >= 10_000) return { reason: "ip_limit" };
+      evictOldest(this.ips);
       item = { start: now, count: 0 };
       this.ips.set(ipHash, item);
     }
@@ -38,5 +43,30 @@ export class RunLimiter {
       finished = true;
       if (!counted) { item.count--; daily.count--; }
     } };
+  }
+}
+
+export class QlooRunLimiter {
+  private ips = new Map<string, { window: Counter; daily: Counter }>();
+  constructor(private now = Date.now, private perIp = positiveInteger(process.env.QLOO_RUNS_PER_IP, 30),
+    private perIpDay = positiveInteger(process.env.QLOO_RUNS_PER_IP_DAY, 300)) {}
+
+  // Count once before live Qloo work, including failed or cancelled runs. Neither
+  // result-cache hits nor shared requests nor mock Qloo work reach this check.
+  reserve(ipHash: string): boolean {
+    const now = this.now();
+    const day = Math.floor(now / 86_400_000);
+    let item = this.ips.get(ipHash);
+    if (!item) {
+      evictOldest(this.ips);
+      item = { window: { start: now, count: 0 }, daily: { start: day, count: 0 } };
+      this.ips.set(ipHash, item);
+    }
+    if (now - item.window.start >= 600_000) item.window = { start: now, count: 0 };
+    if (item.daily.start !== day) item.daily = { start: day, count: 0 };
+    if (item.window.count >= this.perIp || item.daily.count >= this.perIpDay) return false;
+    item.window.count++;
+    item.daily.count++;
+    return true;
   }
 }
