@@ -37,14 +37,14 @@ Encore Rescue is an agentic tool for that night. It does not search the whole wo
 ## 5. Architecture
 
 - Next.js (App Router) + TypeScript. Server code runs on the **Node runtime** only (`export const runtime = "nodejs"`). No platform-specific services (no KV, Blob, Edge Config). The app must run with `npm run build && npm start` on any Node 22 host.
-- `POST /api/rescue` runs one agent session and returns JSON. Hard deadline 50 s per request (`maxDuration = 60`).
+- `POST /api/rescue` runs one agent session and returns JSON. Hard deadline 50 s per request (`maxDuration = 60`). The live model must complete an accepted submission within 40 s, including body reading and pre-resolution, leaving the remaining request budget for deterministic assembly.
 - **Qloo client** (server-only module): base URL from `QLOO_BASE_URL` (default `https://hackathon.api.qloo.com`), header `X-Api-Key` from `QLOO_API_KEY`, GET with comma-joined arrays, 15 s timeout, one retry on 429/5xx with backoff, typed errors. Tolerant parsing (results may be an array or an object holding `entities` / `heatmap` / `tags`; affinity may be `affinity` or `query.affinity`).
 - **Private server-side cache**: in-memory LRU keyed by path + sorted parameters, 24 h TTL. Nothing from live Qloo responses is ever written to the repository or to disk inside it.
-- **LLM**: Anthropic TypeScript SDK (`@anthropic-ai/sdk`), model `claude-haiku-5-5`, manual agentic loop on `client.messages.create` (non-beta). Tools are JSON-schema tools with `strict: true` and `additionalProperties: false`. The run ends when the model calls `submit_rescue_plan` with decisions and draft copy only. The server composes the unchanged public response contract below, completing missing evidence itself. `output_config: { effort: "medium" }`, `max_tokens: 16000`, a target of at most 3 model turns (one parallel gathering batch, at most one follow-up batch, then submission), with an 8-turn safety limit for corrections and stop handling. Append the full `response.content` every turn (thinking blocks must be passed back unchanged). Handle `stop_reason` values `tool_use`, `end_turn` (re-prompt once to submit), `max_tokens`, `pause_turn`, `refusal` (return a clear error; no fallback model).
+- **LLM**: Anthropic TypeScript SDK (`@anthropic-ai/sdk`), model `claude-haiku-5-5`, manual agentic loop on `client.messages.create` (non-beta). Tools are JSON-schema tools with `strict: true` and `additionalProperties: false`. The run ends when the model calls `submit_rescue_plan` with decisions and draft copy only. The server composes the public response contract below, completing missing evidence itself. `output_config: { effort: "medium" }`, `max_tokens: 16000`, a target of at most 3 model turns (one parallel gathering batch, at most one follow-up batch, then submission), with an 8-turn safety limit for corrections and stop handling. Append the full `response.content` every turn (thinking blocks must be passed back unchanged). Handle `stop_reason` values `tool_use`, `end_turn` (re-prompt once to submit), `max_tokens`, `pause_turn`, `refusal`. A deadline, provider error, refusal, output limit or unfinished run aborts model work and uses the existing fixed-rule planner with the same scenario, hard filters, Qloo client and observed evidence. Cached observations, including empty results, are reused. No synthetic Qloo substitution or second model is used. Qloo pre-resolution failure still returns an error.
 - **Mock modes** (so the whole app runs in CI and before keys exist):
   - Qloo mock when `QLOO_API_KEY` is unset or `QLOO_MODE=mock`: hand-written **synthetic** fixtures with fake IDs (`mock-artist-001` style) and clearly fictional sample names. Deterministic pseudo-affinity. A UI banner says "Sample data". Live responses are never recorded into fixtures; a test fails if any fixture contains a UUID-shaped string.
   - LLM mock when `ANTHROPIC_API_KEY` is unset or `LLM_MODE=mock`: a deterministic planner that calls the same tools in a fixed order and fills templated text. Same response contract.
-- **Abuse and spend protection**: per-IP limit (5 runs / 10 min), global cap (300 runs / day, in-memory), input limits (≤ 12 candidates, ≤ 20 lineup acts, ≤ 200 characters per text field), and a result cache keyed by a hash of the normalised scenario (identical sample runs cost nothing).
+- **Abuse and spend protection**: per-IP limit (5 runs / 10 min), global cap (300 runs / day, in-memory), input limits (≤ 12 candidates, ≤ 20 lineup acts, ≤ 200 characters per text field), and a result cache keyed by a hash of the normalised scenario (identical sample runs cost nothing). Fallback results are never stored in this result cache; the next request can attempt a full model answer. Concurrent identical requests may share the current run.
 - **Privacy**: only act names, entity IDs and the city go to Qloo. Booker notes go only to the LLM. The UI asks users not to enter personal data. Server logs record counts and timings only.
 
 ## 6. Agent tools (exposed to the model)
@@ -88,7 +88,7 @@ Response:
   "run_id": "string",
   "mode": "qloo",
   "data_source": "live | mock",
-  "llm": "live | mock",
+  "llm": "live | mock | fallback",
   "excluded": [{ "name": "string", "reason": "string" }],
   "needs_input": [{ "name": "string", "options": [{ "entity_id": "string", "label": "string" }] }],
   "not_in_catalog": ["string"],
@@ -109,6 +109,10 @@ Response:
 }
 ```
 Fixed disclaimers include: Qloo results describe what groups tend to like, not what one person will do; the tool does not predict availability, fees or ticket sales.
+
+`llm: "fallback"` means the language model did not complete an accepted plan and the fixed-rule planner assembled the response. Its disclaimer says: "The language model did not complete an accepted plan. These plans were assembled by fixed rules from the same Qloo evidence." Baseline fallback instead names the same scenario and hard constraints and states that no Qloo evidence was used. The UI shows a calm status notice alongside the plans. The complete trace, including `model_turn` timings and a `fallback` row with the reason and budget, remains present.
+
+Every error response includes `{ "error": "code", "message": "safe explanation", "trace": [] }`, with the trace collected so far (empty when work has not started). Validation errors may also include `issues`. Raw provider bodies, credentials, prompts and model prose are never included. Qloo failure or the hard request deadline may still prevent a response with plans; errors retain their observations.
 
 ## 8. Quality bar
 

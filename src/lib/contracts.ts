@@ -56,7 +56,7 @@ export const responseSchema = z.strictObject({
   run_id: text,
   mode: z.enum(["qloo", "baseline"]),
   data_source: z.enum(["live", "mock"]),
-  llm: z.enum(["live", "mock"]),
+  llm: z.enum(["live", "mock", "fallback"]),
   excluded: z.array(z.strictObject({ name: text, reason: copy })).max(12),
   needs_input: z.array(needsInputSchema).max(33),
   not_in_catalog: z.array(text).max(33),

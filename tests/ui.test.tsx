@@ -57,3 +57,21 @@ it("distinguishes model-turn latency from server-initiated evidence calls in the
   expect(html).toContain("local_heat (server)");
   expect(html).toContain("0 results / 12 ms");
 });
+
+it("renders fallback as a calm status notice with plans and model timings", async () => {
+  for (const mode of ["qloo", "baseline"] as const) {
+    const result = await runAgent({ mode, scenario: sampleForMode("mock") }, new AbortController().signal, {
+      send: async () => { throw new Error("synthetic provider failure"); },
+    });
+    const html = renderToStaticMarkup(createElement(ResultPanel, { result, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
+    expect(result.llm).toBe("fallback");
+    expect(html).toContain('class="notice" role="status"');
+    expect(html).toContain("Plans assembled with fixed rules.");
+    expect(html).toContain(mode === "qloo" ? "These plans use the same Qloo evidence." : "without Qloo evidence.");
+    expect(html).toContain("Planner / fallback");
+    expect(html).toContain("Model turn 1");
+    expect(html).toContain("PLAN 01");
+    expect(html).not.toContain('role="alert"');
+    expect(html).not.toContain("synthetic provider failure");
+  }
+});

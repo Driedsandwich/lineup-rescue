@@ -1,10 +1,11 @@
 import "server-only";
 import { QlooClient } from "./client";
 import { MockQloo } from "./mock";
+import type { Qloo } from "./types";
 
 export function qlooMode(): "mock" | "live" {
   return !process.env.QLOO_API_KEY || process.env.QLOO_MODE === "mock" ? "mock" : "live";
 }
-export function createQloo() {
+export function createQloo(): Qloo {
   return qlooMode() === "mock" ? new MockQloo() : new QlooClient(process.env.QLOO_API_KEY!, process.env.QLOO_BASE_URL);
 }

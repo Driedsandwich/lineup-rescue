@@ -5,6 +5,7 @@ import { submissionSchema, type RescueRequest, type NeedsInput, type Trace } fro
 import type { Entity, Heat, Qloo } from "../qloo/types";
 import { QlooError } from "../qloo/client";
 import { filterCandidates } from "./constraints";
+import { abortable } from "../abort";
 
 const text = z.string().min(1).max(200);
 const ids = z.array(text).min(1).max(32);
@@ -52,9 +53,8 @@ export class ToolContext {
   readonly resolutions = new Map<string, Resolution>();
   readonly rankings: Ranking[] = [];
   readonly heats = new Map<string, Heat[]>();
-  readonly trace: Trace[] = [];
   private calls = 0;
-  constructor(readonly request: RescueRequest, readonly qloo: Qloo, readonly signal: AbortSignal) {
+  constructor(readonly request: RescueRequest, readonly qloo: Qloo, readonly signal: AbortSignal, readonly trace: Trace[] = []) {
     this.filtered = filterCandidates(request.scenario.candidates);
     this.names = new Set([request.scenario.cancelled_act.name, ...request.scenario.lineup.map(a => a.name), ...this.filtered.eligible.map(a => a.name)]);
   }
@@ -71,12 +71,12 @@ export class ToolContext {
       key.includes("id") ? (Array.isArray(value) ? value.map(id => `${String(id).slice(0, 8)}…`) : `${String(value).slice(0, 8)}…`) : value,
     ]));
   }
-  async execute(name: string, raw: unknown, by?: "server"): Promise<ToolResult> {
+  async execute(name: string, raw: unknown, by?: "server", signal = this.signal): Promise<ToolResult> {
     const start = performance.now();
     let params: Record<string, unknown> = {};
     let result: ToolResult;
     try {
-      this.signal.throwIfAborted();
+      signal.throwIfAborted();
       if (++this.calls > 60) throw new Error("Tool call budget exhausted");
       if (this.request.mode === "baseline") throw new Error("Qloo tools are unavailable in baseline mode");
       switch (name) {
@@ -88,12 +88,13 @@ export class ToolContext {
             const existing = this.resolutions.get(act);
             if (existing) return existing;
             let entities: Entity[];
-            try { entities = await this.qloo.search(act, this.signal); }
+            try { entities = await abortable(this.qloo.search(act, signal), signal); }
             catch (error) {
               // Search's documented 404 means no matching entities, not a guessed ID.
               if (error instanceof QlooError && error.code === "http" && error.status === 404) entities = [];
               else throw error;
             }
+            signal.throwIfAborted();
             entities = entities.slice(0, 5);
             const chosen = this.request.resolutions?.[act];
             const exact = entities.filter(e => e.name.toLowerCase() === act.toLowerCase());
@@ -115,7 +116,8 @@ export class ToolContext {
           const cancelled = this.resolved.get(this.request.scenario.cancelled_act.name)?.entity_id;
           if (options.includes(cancelled ?? "") || options.some(id => signals.includes(id))) throw new Error("Options must exclude cancelled act and signal acts");
           const ranking: Ranking = { options, signals, results: [] };
-          const entities = await this.qloo.rank(options, signals, input.city, this.signal);
+          const entities = await abortable(this.qloo.rank(options, signals, input.city, signal), signal);
+          signal.throwIfAborted();
           ranking.results = entities;
           this.rankings.push(ranking);
           result = { status: entities.length ? "ok" : "empty", results: entities };
@@ -125,7 +127,8 @@ export class ToolContext {
           const input = toolSchemas.local_heat.parse(raw);
           params = input;
           if (!this.known(input.entity_id) || input.region !== this.request.scenario.city) throw new Error("Use a resolved scenario ID and the scenario city");
-          const heat = await this.qloo.heat(input.entity_id, input.region, this.signal);
+          const heat = await abortable(this.qloo.heat(input.entity_id, input.region, signal), signal);
+          signal.throwIfAborted();
           this.heats.set(input.entity_id, heat);
           result = { status: heat.length ? "ok" : "empty", results: heat };
           break;
@@ -133,8 +136,11 @@ export class ToolContext {
         default: throw new Error("Unknown tool");
       }
     } catch (error) {
-      if (this.signal.aborted) throw error;
       result = { status: "error", results: [], error: error instanceof QlooError ? error.message : "Invalid tool request or unavailable data; do not infer missing evidence." };
+      if (signal.aborted) {
+        this.trace.push({ tool: name.slice(0, 200), params: { ...this.redact(params), ...(by ? { by } : {}) }, status: "error", result_count: 0, ms: Math.round(performance.now() - start) });
+        throw error;
+      }
     }
     this.trace.push({ tool: name.slice(0, 200), params: { ...this.redact(params), ...(by ? { by } : {}) }, status: result.status, result_count: result.results.length, ms: Math.round(performance.now() - start) });
     return result;

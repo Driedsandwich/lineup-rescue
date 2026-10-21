@@ -12,10 +12,10 @@ export const DISCLAIMERS = [
 export function llmMode(): "live" | "mock" {
   return !process.env.ANTHROPIC_API_KEY || process.env.LLM_MODE === "mock" ? "mock" : "live";
 }
-export function envelope(ctx: ToolContext, plans: Plan[]): RescueResponse {
+export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode()): RescueResponse {
   const s = ctx.request.scenario;
   return {
-    run_id: randomUUID(), mode: ctx.request.mode, data_source: ctx.qloo.source, llm: llmMode(),
+    run_id: randomUUID(), mode: ctx.request.mode, data_source: ctx.qloo.source, llm,
     excluded: ctx.filtered.excluded, needs_input: ctx.needsInput, not_in_catalog: ctx.notInCatalog, plans,
     announcement: {
       short_post: `${s.cancelled_act.name} cannot perform at ${s.festival_name} on ${s.date}. We are reviewing the running order. Confirmed changes and ticket guidance will follow through official channels.`,
@@ -29,7 +29,9 @@ export function envelope(ctx: ToolContext, plans: Plan[]): RescueResponse {
       "Assign an organiser contact and verify replacement fees, payment timing and production requirements separately.",
     ] })),
     trace: [...ctx.trace],
-    disclaimers: [...DISCLAIMERS, ...(ctx.qloo.source === "mock" ? ["Sample data: fictional acts and synthetic pseudo-affinity; these are not live Qloo results."] : []), ...(ctx.request.mode === "baseline" ? ["LLM only: ungrounded suggestions; no Qloo catalog lookup or audience scoring was performed."] : [])],
+    disclaimers: [...DISCLAIMERS, ...(ctx.qloo.source === "mock" ? ["Sample data: fictional acts and synthetic pseudo-affinity; these are not live Qloo results."] : []), ...(ctx.request.mode === "baseline" ? ["Ungrounded suggestions; no Qloo catalog lookup or audience scoring was performed."] : []), ...(llm === "fallback" ? [
+      `The language model did not complete an accepted plan. These plans were assembled by fixed rules from ${ctx.request.mode === "baseline" ? "the same scenario and hard constraints; no Qloo evidence was used" : "the same Qloo evidence"}.`,
+    ] : [])],
   };
 }
 function metric(value: number | null | undefined, sample: boolean) {
@@ -55,7 +57,8 @@ function parseSubmission(raw: unknown) {
 }
 
 /** Validate decisions first, complete missing observations, then compose the public response. */
-export async function finalise(ctx: ToolContext, raw: unknown): Promise<RescueResponse> {
+export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode(), signal = ctx.signal }: { llm?: RescueResponse["llm"]; signal?: AbortSignal } = {}): Promise<RescueResponse> {
+  signal.throwIfAborted();
   const submitted = parseSubmission(raw);
   const seen = new Set<string>();
   for (const plan of submitted.plans) {
@@ -109,13 +112,13 @@ export async function finalise(ctx: ToolContext, raw: unknown): Promise<RescueRe
       for (const id of [headliner!, replacement!]) if (!ctx.heats.has(id)) heats.add(id);
     }
     await Promise.all([
-      ...[...rankings.values()].map(batch => ctx.execute("rank_against_audience", { option_ids: [...batch.options], signal_ids: batch.signals, city: ctx.request.scenario.city }, "server")),
-      ...[...heats].map(id => ctx.execute("local_heat", { entity_id: id, region: ctx.request.scenario.city }, "server")),
+      ...[...rankings.values()].map(batch => ctx.execute("rank_against_audience", { option_ids: [...batch.options], signal_ids: batch.signals, city: ctx.request.scenario.city }, "server", signal)),
+      ...[...heats].map(id => ctx.execute("local_heat", { entity_id: id, region: ctx.request.scenario.city }, "server", signal)),
     ]);
   }
   const plans: Plan[] = prepared.map(({ plan, original, replacement, promoted, headliner, lineupIds }) => {
     if (ctx.request.mode === "baseline") return { ...plan, evidence: {
-      fit_original_audience: "LLM-only guess; no audience data.", fit_lineup_audience: "LLM-only guess; no audience data.", local_heat: "Not checked; no Qloo tools.",
+      fit_original_audience: llm === "fallback" ? "Fixed-rule suggestion; no audience data." : "LLM-only guess; no audience data.", fit_lineup_audience: llm === "fallback" ? "Fixed-rule suggestion; no audience data." : "LLM-only guess; no audience data.", local_heat: "Not checked; no Qloo tools.",
     }, caveats: [...plan.caveats, "Ungrounded suggestion; verify fit with the organiser."] };
     const originalFit = ctx.ranking(headliner!, [original!]);
     const fillFit = promoted ? ctx.ranking(replacement!, [promoted]) : undefined;
@@ -127,6 +130,7 @@ export async function finalise(ctx: ToolContext, raw: unknown): Promise<RescueRe
       local_heat: heat.length ? heat.map(h => `${h.label}: ${metric(h.affinity, sample)}`).join("; ") : "No local heat evidence available.",
     }, caveats: [...plan.caveats, "Affinity is aggregate evidence, not a guarantee of audience response."] };
   });
+  signal.throwIfAborted();
   ctx.trace.push({ tool: "submit_rescue_plan", params: { plan_count: plans.length }, status: plans.length ? "ok" : "empty", result_count: plans.length, ms: 0 });
-  return responseSchema.parse({ ...envelope(ctx, plans), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
+  return responseSchema.parse({ ...envelope(ctx, plans, llm), announcement: submitted.announcement, refund_checklist: submitted.refund_checklist });
 }
