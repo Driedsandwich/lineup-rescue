@@ -2,6 +2,8 @@
 
 **Audience evidence for the night a headliner cancels.**
 
+**Live demo:** https://lineup-rescue.vercel.app (live Qloo data and a live model; no login, free until the end of the Judging Period).
+
 A festival booker has a short list of acts who can make it. The difficult decision is which replacement fits both the audience who came for the cancelled act and the audience for the rest of the bill. A plausible artist name from a language model is not evidence of that fit.
 
 Lineup Rescue is a decision-support prototype for bookers, promoters and festival operations leads. It filters the booker's phone list, uses Qloo's aggregate taste graph to assess the eligible choices in the festival city, and prepares rebuild options, announcement drafts and a ticket-type checklist. It also considers promoting someone already on the bill and filling their freed slot. It does not make bookings or send messages.
@@ -128,7 +130,7 @@ Inputs, provider output and model text are untrusted data. Tool validation limit
 1. **Problem and user:** the opening sections identify the cancelled-slot decision and the festival staff responsible.
 2. **Qloo's role:** the workflow and endpoint table show how identity, two-audience rankings and regional context support that decision.
 3. **Inspectability:** the synthetic worked path and expandable trace connect selected entities and request parameters to the resulting plans, with IDs shortened.
-4. **Demonstration:** the two-minute walkthrough runs locally without credentials or personal data; capture that mock screen if adding submission screenshots or video.
+4. **Demonstration:** the hosted demo at https://lineup-rescue.vercel.app runs on live Qloo data without a login; submission screenshots are taken there and show no credentials or personal data. The local walkthrough runs without credentials on synthetic data.
 5. **Reproduction:** clean-install commands, configuration and offline checks appear here and in the lockfile.
 6. **Boundaries:** the limitations above distinguish taste evidence, operational assumptions and conclusions the tool cannot support.
 
