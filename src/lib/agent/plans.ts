@@ -16,6 +16,7 @@ export function llmMode(): "live" | "mock" {
 export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode(), fallbackReason?: string): RescueResponse {
   const s = ctx.request.scenario;
   const fallbackNotice = fallbackReason === "qloo_limit" ? "Audience data was not fetched because of high request volume from this address. These plans use fixed rules only."
+    : fallbackReason === "qloo_daily_budget" ? "Audience data was not fetched because this server reached its daily Qloo request budget. These plans use fixed rules only."
     : fallbackReason === "ip_limit" ? "Per-IP usage limit for the language model reached."
     : fallbackReason === "daily_cap" ? "Daily usage limit for the language model reached on this server."
     : fallbackReason === "deadline" ? "The language model time budget was reached."

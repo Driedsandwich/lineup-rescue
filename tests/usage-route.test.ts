@@ -51,7 +51,7 @@ it("degrades at the per-IP env limit, preserves evidence, and never caches limit
   // Limit fallbacks did not spend the remaining daily model slot.
   expect((await post("other IP", "synthetic-other")).body.llm).toBe("live");
   expect(send).toHaveBeenCalledTimes(3);
-  const html = renderToStaticMarkup(createElement(ResultPanel, { result: first.body, differences: [], busy: false,
+  const html = renderToStaticMarkup(createElement(ResultPanel, { result: first.body, cancelledActName: sample.cancelled_act.name, differences: [], busy: false,
     pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
   expect(html).toContain("Per-IP usage limit for the language model reached.");
   expect(html).toContain('class="notice" role="status"');

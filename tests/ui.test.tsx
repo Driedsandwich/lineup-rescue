@@ -25,7 +25,7 @@ it("renders per-act radio choices, missing catalog copy, diff labels and editabl
   const qloo = await runAgent({ mode: "qloo", scenario }, new AbortController().signal);
   const baseline = await runAgent({ mode: "baseline", scenario }, new AbortController().signal);
   const differences = comparePlans(qloo.plans, baseline.plans);
-  const props = { differences, busy: true, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} };
+  const props = { cancelledActName: scenario.cancelled_act.name, differences, busy: true, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} };
   const html = renderToStaticMarkup(createElement(ResultPanel, { ...props, result: qloo }));
   expect(html).toContain('type="radio"');
   expect(html).toContain('name="resolution-Sample Twin Lantern"');
@@ -34,6 +34,8 @@ it("renders per-act radio choices, missing catalog copy, diff labels and editabl
   expect(html).toContain("Different choice at this position");
   expect(html).toContain("Tool trace");
   expect(html).toContain("Short social post");
+  expect(html).not.toContain("Choose the catalog match for the cancelled act above, then re-run.");
+  expect(html).not.toContain("The cancelled act was not found in Qloo");
   const control = renderToStaticMarkup(createElement(ResultPanel, { ...props, result: baseline }));
   expect(control).toContain("No audience evidence");
   expect(control).not.toContain("<meter");
@@ -46,13 +48,29 @@ it("renders unknown evidence without a numeric meter and labels actual affinity 
   expect(measured).toContain('aria-label="Local heat: affinity 0.500, not a probability"');
 });
 
+it.each([
+  ["Sample Twin Lantern", "Choose the catalog match for the cancelled act above, then re-run."],
+  ["Sample Unknown", "The cancelled act was not found in Qloo&#x27;s catalog, so its audience cannot be compared. Check the spelling or try another act."],
+])("explains why plans cannot be ranked for the unresolved cancelled act %s", async (name, notice) => {
+  const scenario = sampleForMode("mock");
+  scenario.candidates = scenario.candidates.filter(act => act.name !== name);
+  scenario.cancelled_act.name = name;
+  const result = await runAgent({ mode: "qloo", scenario }, new AbortController().signal);
+  expect(result.plans).toEqual([]);
+  const html = renderToStaticMarkup(createElement(ResultPanel, { result, cancelledActName: name, differences: [], busy: false,
+    pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
+  expect(html).toContain(notice);
+  expect(html.indexOf(notice)).toBeGreaterThan(html.indexOf('class="plan-stack"'));
+  expect(html).not.toContain("No supported plan. Resolve the names above or update the phone list.");
+});
+
 it("distinguishes model-turn latency from server-initiated evidence calls in the trace", async () => {
   const result = await runAgent({ mode: "baseline", scenario: sampleForMode("mock") }, new AbortController().signal);
   result.trace = [
     { tool: "model_turn", params: { turn: 2 }, status: "ok", result_count: 1, ms: 14000 },
     { tool: "local_heat", params: { by: "server" }, status: "empty", result_count: 0, ms: 12 },
   ];
-  const html = renderToStaticMarkup(createElement(ResultPanel, { result, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
+  const html = renderToStaticMarkup(createElement(ResultPanel, { result, cancelledActName: sampleForMode("mock").cancelled_act.name, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
   expect(html).toContain("2 entries");
   expect(html).toContain("Model turn 2");
   expect(html).toContain("1 tool calls requested / 14000 ms");
@@ -65,7 +83,7 @@ it("renders fallback as a calm status notice with plans and model timings", asyn
     const result = await runAgent({ mode, scenario: sampleForMode("mock") }, new AbortController().signal, {
       send: async () => { throw new Error("synthetic provider failure"); },
     });
-    const html = renderToStaticMarkup(createElement(ResultPanel, { result, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
+    const html = renderToStaticMarkup(createElement(ResultPanel, { result, cancelledActName: sampleForMode("mock").cancelled_act.name, differences: [], busy: false, pendingChoices: false, resolutions: {}, choose: () => {}, rerun: () => {} }));
     expect(result.llm).toBe("fallback");
     expect(html).toContain('class="notice" role="status"');
     expect(html).toContain("Plans assembled with fixed rules.");

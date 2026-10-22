@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { Message, MessageParam, ToolResultBlockParam } from "@anthropic-ai/sdk/resources/messages";
 import type { RescueRequest, Trace } from "../contracts";
 import { abortable } from "../abort";
-import type { ModelReservation } from "../limits";
+import type { ModelReservation, QlooLimitReason } from "../limits";
 import { createQloo } from "../qloo";
 import { definitions, ToolContext } from "./tools";
 import { finalise, llmMode, SubmissionError } from "./plans";
@@ -97,7 +97,7 @@ export async function liveLoop(ctx: ToolContext, send?: MessageSender, signal = 
   throw new AgentError("unfinished", "The agent reached its eight-turn limit without submitting a plan.");
 }
 export const MODEL_BUDGET_MS = 40_000;
-type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number; reserveModel?: () => ModelReservation; reserveQloo?: () => boolean };
+type RunOptions = { send?: MessageSender; modelBudgetMs?: number; trace?: Trace[]; startedAt?: number; reserveModel?: () => ModelReservation; reserveQloo?: () => QlooLimitReason | undefined };
 export async function runAgent(request: RescueRequest, signal: AbortSignal, options: RunOptions = {}) {
   const trace = options.trace ?? [];
   const start = options.startedAt ?? performance.now();
@@ -105,14 +105,15 @@ export async function runAgent(request: RescueRequest, signal: AbortSignal, opti
     const ctx = new ToolContext(request, createQloo(), signal, trace);
     signal.throwIfAborted();
     if (request.mode === "qloo") {
-      if (ctx.qloo.source === "live" && options.reserveQloo && !options.reserveQloo()) {
+      const qlooLimit = ctx.qloo.source === "live" ? options.reserveQloo?.() : undefined;
+      if (qlooLimit) {
         const baseline = new ToolContext({ ...request, mode: "baseline" }, ctx.qloo, signal, trace);
-        trace.push({ tool: "fallback", params: { reason: "qloo_limit" }, status: "ok", result_count: 0, ms: 0 });
-        const result = await finalise(baseline, await mockPlan(baseline), { llm: "fallback", fallbackReason: "qloo_limit" });
+        trace.push({ tool: "fallback", params: { reason: "qloo_limit", sub_reason: qlooLimit }, status: "ok", result_count: 0, ms: 0 });
+        const result = await finalise(baseline, await mockPlan(baseline), { llm: "fallback", fallbackReason: qlooLimit === "daily_budget" ? "qloo_daily_budget" : "qloo_limit" });
         return { ...result, mode: request.mode };
       }
       const result = await ctx.execute("resolve_acts", { names: [...ctx.names] }, "server");
-      if (result.status === "error") throw new AgentError("provider", "Qloo lookup failed. Check API access or use explicit mock mode; no synthetic fallback was used.");
+      if (result.status === "error") throw new AgentError("provider", "Qloo could not be reached for this run. Please try again in a minute.");
     }
     if (!options.send && llmMode() === "mock") return await finalise(ctx, await mockPlan(ctx));
     const model = new AbortController();

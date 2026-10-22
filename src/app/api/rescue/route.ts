@@ -7,13 +7,29 @@ import { runAgent, AgentError } from "../../../lib/agent/loop";
 import { llmMode } from "../../../lib/agent/plans";
 import { qlooMode } from "../../../lib/qloo";
 import { qlooRequests } from "../../../lib/qloo/requests";
+import { abortable } from "../../../lib/abort";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 const limiter = new RunLimiter();
 const qlooLimiter = new QlooRunLimiter();
 const results = new LruCache<RescueResponse>(100);
-const pending = new Map<string, { run: Promise<RescueResponse>; trace: Trace[] }>();
+type PendingRun = { run: Promise<RescueResponse>; trace: Trace[]; controller: AbortController; waiters: number; settled: boolean };
+const pending = new Map<string, PendingRun>();
+
+async function waitForRun(entry: PendingRun, signal: AbortSignal) {
+  entry.waiters++;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    if (--entry.waiters === 0 && !entry.settled) entry.controller.abort(new AgentError("deadline", "All waiting clients disconnected."));
+  };
+  signal.addEventListener("abort", release, { once: true });
+  if (signal.aborted) release();
+  try { return await abortable(entry.run, signal); }
+  finally { signal.removeEventListener("abort", release); release(); }
+}
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`).join(",")}}`;
@@ -58,6 +74,7 @@ export async function POST(request: Request) {
     });
     if (request.signal.aborted) controller.abort();
     const raw = await Promise.race([readBody(request, controller.signal), aborted]);
+    controller.signal.throwIfAborted();
     const parsed = requestSchema.safeParse(raw);
     if (!parsed.success) return failure({ error: "invalid_input", message: "Check input limits and field formats.", issues: parsed.error.issues.map(i => ({ path: i.path.join("."), message: i.message })) }, 400);
     const input = parsed.data;
@@ -67,24 +84,35 @@ export async function POST(request: Request) {
     const cached = results.get(key);
     if (cached) return json(cached, 200, { "X-Result-Cache": "hit" });
     const existing = pending.get(key);
-    if (existing) {
+    if (existing && !existing.controller.signal.aborted) {
       trace = existing.trace;
-      return json(await Promise.race([existing.run, aborted]), 200, { "X-Result-Cache": "shared" });
+      return json(await Promise.race([waitForRun(existing, controller.signal), aborted]), 200, { "X-Result-Cache": "shared" });
     }
     const ipKey = clientKey(ip);
-    const run = runAgent(input, controller.signal, { trace, startedAt: start,
-      reserveQloo: () => qlooRequests.canStartRun() && qlooLimiter.reserve(ipKey), reserveModel: () => limiter.reserve(ipKey) }).then(result => {
-      controller.signal.throwIfAborted();
-      if (result.llm !== "fallback") results.set(key, result);
-      return result;
-    });
-    pending.set(key, { run, trace });
-    try {
-      const result = await Promise.race([run, aborted]);
-      // Counts and timings only. Never log names, notes, prompts or provider bodies.
-      console.info(JSON.stringify({ candidates: input.scenario.candidates.length, plans: result.plans.length, ms: Math.round(performance.now() - start) }));
-      return json(result, 200, { "X-Result-Cache": "miss" });
-    } finally { pending.delete(key); }
+    // The shared run owns cancellation and cleanup; no individual waiter does.
+    const sharedController = new AbortController();
+    const sharedTimer = setTimeout(() => sharedController.abort(new AgentError("deadline", "The 50-second deadline was reached. No partial plan was returned.")), Math.max(0, 50_000 - (performance.now() - start)));
+    const entry: PendingRun = {
+      controller: sharedController, trace, waiters: 0, settled: false,
+      // Defer work until the first waiter is registered, including its abort listener.
+      run: Promise.resolve().then(async () => {
+        const result = await abortable(runAgent(input, sharedController.signal, { trace, startedAt: start,
+          reserveQloo: () => !qlooRequests.canStartRun() ? "daily_budget" : !qlooLimiter.reserve(ipKey) ? "client" : undefined,
+          reserveModel: () => limiter.reserve(ipKey) }), sharedController.signal);
+        sharedController.signal.throwIfAborted();
+        if (result.llm !== "fallback") results.set(key, result);
+        return result;
+      }).finally(() => {
+        entry.settled = true;
+        clearTimeout(sharedTimer);
+        if (pending.get(key) === entry) pending.delete(key);
+      }),
+    };
+    pending.set(key, entry);
+    const result = await Promise.race([waitForRun(entry, controller.signal), aborted]);
+    // Counts and timings only. Never log names, notes, prompts or provider bodies.
+    console.info(JSON.stringify({ candidates: input.scenario.candidates.length, plans: result.plans.length, ms: Math.round(performance.now() - start) }));
+    return json(result, 200, { "X-Result-Cache": "miss" });
   } catch (error) {
     if (error instanceof AgentError) {
       if (error.trace.length) trace = error.trace;

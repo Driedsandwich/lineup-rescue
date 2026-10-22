@@ -7,6 +7,12 @@ import { requestSchema } from "../src/lib/contracts";
 import sample from "../samples/scenario.json";
 
 describe("fixture and server boundary guards", () => {
+  it("documents all four Qloo limit settings in the environment example without exposing its contents", () => {
+    const settings = new Set([...readFileSync(".env.example", "utf8").matchAll(/^#\s*(QLOO_[A-Z_]+)=/gm)].map(match => match[1]));
+    for (const name of ["QLOO_RUNS_PER_IP", "QLOO_RUNS_PER_IP_DAY", "QLOO_MAX_PER_SECOND", "QLOO_CALLS_PER_DAY"]) {
+      expect(settings.has(name), name).toBe(true);
+    }
+  });
   it("fails on any UUID-shaped string in any fixture file, recursively", () => {
     function inspect(path: string) {
       for (const item of readdirSync(path, { withFileTypes: true })) {

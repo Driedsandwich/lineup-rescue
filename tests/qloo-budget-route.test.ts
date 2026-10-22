@@ -78,10 +78,11 @@ it("finishes an admitted run across the daily budget, then returns uncached qloo
     const limited = await post({ ...sample, festival_name: "Synthetic budget limit" });
     expect(limited.response.headers.get("X-Result-Cache")).toBe("miss");
     expect(limited.body.llm).toBe("fallback");
-    expect(limited.body.trace).toContainEqual({ tool: "fallback", params: { reason: "qloo_limit" }, status: "ok", result_count: 0, ms: 0 });
+    expect(limited.body.trace).toContainEqual({ tool: "fallback", params: { reason: "qloo_limit", sub_reason: "daily_budget" }, status: "ok", result_count: 0, ms: 0 });
     expect(limited.body.trace.some(row => ["resolve_acts", "model_turn", "local_heat", "rank_against_audience"].includes(row.tool))).toBe(false);
     expect(limited.body.plans[0].evidence.fit_original_audience).toBe("Fixed-rule suggestion; no audience data.");
-    expect(limited.body.disclaimers.join(" ")).toContain("These plans use fixed rules only.");
+    expect(limited.body.disclaimers.join(" ")).toContain("Audience data was not fetched because this server reached its daily Qloo request budget. These plans use fixed rules only.");
+    expect(limited.body.disclaimers.join(" ")).not.toContain("high request volume from this address");
     expect(limited.body.run_id).not.toBe(first.body.run_id);
   }
   expect((await post(sample)).response.headers.get("X-Result-Cache")).toBe("hit");

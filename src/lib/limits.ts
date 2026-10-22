@@ -1,6 +1,7 @@
 import "server-only";
 
 export type UsageLimitReason = "ip_limit" | "daily_cap";
+export type QlooLimitReason = "client" | "daily_budget";
 export type ModelReservation = { reason: UsageLimitReason } | { finish: (counted: boolean) => void };
 type Counter = { start: number; count: number };
 const MAX_KEYS = 10_000;

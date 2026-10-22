@@ -1,7 +1,7 @@
 import type { RescueResponse } from "../lib/contracts";
 import { comparePlans, evidenceValue } from "../lib/presentation";
 
-type Props = { result: RescueResponse; differences: ReturnType<typeof comparePlans>; busy: boolean; pendingChoices: boolean; resolutions: Record<string, string>; choose: (name: string, id: string) => void; rerun: () => void };
+type Props = { result: RescueResponse; cancelledActName: string; differences: ReturnType<typeof comparePlans>; busy: boolean; pendingChoices: boolean; resolutions: Record<string, string>; choose: (name: string, id: string) => void; rerun: () => void };
 
 export function EvidenceMeter({ label, text, baseline }: { label: string; text: string; baseline: boolean }) {
   const value = baseline ? null : evidenceValue(text);
@@ -11,8 +11,12 @@ export function EvidenceMeter({ label, text, baseline }: { label: string; text: 
   </div>;
 }
 
-export default function ResultPanel({ result, differences, busy, pendingChoices, resolutions, choose, rerun }: Props) {
+export default function ResultPanel({ result, cancelledActName, differences, busy, pendingChoices, resolutions, choose, rerun }: Props) {
   const baseline = result.mode === "baseline";
+  const cancelledNotice = baseline ? undefined
+    : result.needs_input.some(act => act.name === cancelledActName.trim()) ? "Choose the catalog match for the cancelled act above, then re-run."
+    : result.not_in_catalog.includes(cancelledActName.trim()) ? "The cancelled act was not found in Qloo's catalog, so its audience cannot be compared. Check the spelling or try another act."
+    : undefined;
   return <section className={`result ${baseline ? "baseline" : "grounded"}`} aria-label={baseline ? "LLM-only result" : "Qloo rescue result"}>
     <header className="result-heading"><div className="split"><span className="eyebrow">{baseline ? "The control" : "The grounded route"}</span><span className={`chip ${baseline ? "warning" : "good"}`}>{baseline ? "No audience evidence" : result.data_source === "mock" ? "Synthetic evidence" : "Qloo evidence"}</span></div><h3>{baseline ? "LLM-only" : "Rescue with Qloo"}</h3><p>{baseline ? "Same inputs. Qloo tools removed." : "Feasibility first. Audience fit next."}</p><small className="mono">{baseline ? "Catalog not checked" : `Taste source / ${result.data_source}`} · Planner / {result.llm}</small></header>
     <div className="result-context">
@@ -27,7 +31,8 @@ export default function ResultPanel({ result, differences, busy, pendingChoices,
     {!!result.excluded.length && <details className="exclusions"><summary><span className="chip danger">Excluded · {result.excluded.length}</span> Hard constraints</summary><ul>{result.excluded.map(act => <li key={act.name}><strong>{act.name}</strong><br />{act.reason}</li>)}</ul></details>}
     </div>
     <div className="plan-stack">
-      {!result.plans.length && <p className="notice">No supported plan. Resolve the names above or update the phone list.</p>}
+      {cancelledNotice && <p className="notice" role="status">{cancelledNotice}</p>}
+      {!result.plans.length && !cancelledNotice && <p className="notice">No supported plan. Resolve the names above or update the phone list.</p>}
       {result.plans.map((plan, index) => {
         const diff = differences[index];
         return <article className={`plan ${diff && diff.status !== "same" ? "differs" : ""}`} key={plan.id}>

@@ -37,7 +37,7 @@ async function limited(name = "limited", ip?: string) {
   const result = await post(name, ip);
   expect(result.body.mode).toBe("qloo");
   expect(result.body.llm).toBe("fallback");
-  expect(result.body.trace).toContainEqual({ tool: "fallback", params: { reason: "qloo_limit" }, status: "ok", result_count: 0, ms: 0 });
+  expect(result.body.trace).toContainEqual({ tool: "fallback", params: { reason: "qloo_limit", sub_reason: "client" }, status: "ok", result_count: 0, ms: 0 });
   expect(result.body.trace.some(row => ["resolve_acts", "rank_against_audience", "local_heat", "model_turn"].includes(row.tool))).toBe(false);
   expect(result.body.plans).toHaveLength(3);
   for (const plan of result.body.plans) {
