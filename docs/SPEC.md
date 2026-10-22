@@ -1,10 +1,10 @@
-# Encore Rescue — product and technical spec (v0.1)
+# Lineup Rescue — product and technical spec (v0.1)
 
 ## 1. Problem
 
 A festival headliner cancels on the day or the day before. The booker phones agents and managers and collects a short list of acts that are free, nearby, and able to arrive within 48 hours with crew and gear. Then comes the hardest question: which of those acts can take the slot without the night feeling like a downgrade to the people who bought tickets for the cancelled act and for the rest of the lineup? Today that call is made on instinct and on headline metrics such as monthly listeners, which a music analytics company itself says were never designed to predict ticket buying.
 
-Encore Rescue is an agentic tool for that night. It does not search the whole world for "similar artists". It takes the booker's feasible list, checks the hard constraints first, and then uses Qloo's taste graph to compare the feasible options against two audiences at once (the cancelled act's audience and the remaining lineup's audience) in the festival's city. It also considers promoting an act already on the bill. It ends with a ready-to-edit announcement and a refund-handling checklist per ticket type.
+Lineup Rescue is an agentic tool for that night. It does not search the whole world for "similar artists". It takes the booker's feasible list, checks the hard constraints first, and then uses Qloo's taste graph to compare the feasible options against two audiences at once (the cancelled act's audience and the remaining lineup's audience) in the festival's city. It also considers promoting an act already on the bill. It ends with a ready-to-edit announcement and a refund-handling checklist per ticket type.
 
 ## 2. Users and scope
 
@@ -30,9 +30,9 @@ Encore Rescue is an agentic tool for that night. It does not search the whole wo
 
 ## 4. Practice facts the design follows (sources in the Devpost description)
 
-- When an act cancels, the questions asked are: who is free, who is nearby, who can be there within 48 hours with their team and gear, and above all who can replace the act without it clashing (Belgian public broadcaster RTBF, 2025). Encore Rescue applies the first three as hard filters and spends Qloo on the last one.
+- When an act cancels, the questions asked are: who is free, who is nearby, who can be there within 48 hours with their team and gear, and above all who can replace the act without it clashing (Belgian public broadcaster RTBF, 2025). Lineup Rescue applies the first three as hard filters and spends Qloo on the last one.
 - Organisers have promoted an act already on the bill to the headline slot and filled the freed slot with a new act (Rock Werchter, July 2025).
-- At short notice, a replacement may require full payment of fees rather than a deposit (Festival Pro, 2025). Encore Rescue does not price anything; it flags fee questions in the checklist.
+- At short notice, a replacement may require full payment of fees rather than a deposit (Festival Pro, 2025). Lineup Rescue does not price anything; it flags fee questions in the checklist.
 
 ## 5. Architecture
 

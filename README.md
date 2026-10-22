@@ -1,10 +1,10 @@
-# Encore Rescue
+# Lineup Rescue
 
 **Audience evidence for the night a headliner cancels.**
 
 A festival booker has a short list of acts who can make it. The difficult decision is which replacement fits both the audience who came for the cancelled act and the audience for the rest of the bill. A plausible artist name from a language model is not evidence of that fit.
 
-Encore Rescue is a decision-support prototype for bookers, promoters and festival operations leads. It filters the booker's phone list, uses Qloo's aggregate taste graph to assess the eligible choices in the festival city, and prepares rebuild options, announcement drafts and a ticket-type checklist. It also considers promoting someone already on the bill and filling their freed slot. It does not make bookings or send messages.
+Lineup Rescue is a decision-support prototype for bookers, promoters and festival operations leads. It filters the booker's phone list, uses Qloo's aggregate taste graph to assess the eligible choices in the festival city, and prepares rebuild options, announcement drafts and a ticket-type checklist. It also considers promoting someone already on the bill and filling their freed slot. It does not make bookings or send messages.
 
 ## How the agent works
 
@@ -116,7 +116,7 @@ Inputs, provider output and model text are untrusted data. Tool validation limit
 
 ## Known limitations
 
-- Qloo provides **aggregate taste evidence only**, not individual preferences or causal effects. Encore Rescue does not predict availability, fees or ticket sales. Those remain organiser decisions and checks.
+- Qloo provides **aggregate taste evidence only**, not individual preferences or causal effects. Lineup Rescue does not predict availability, fees or ticket sales. Those remain organiser decisions and checks.
 - Catalog coverage of smaller acts may be limited. Ambiguous and missing entries reduce the supported plan set; empty results do not establish zero fit. An unrecognized cancelled act can prevent any grounded plan.
 - Provider response parsing accepts documented kit-shaped variants (`results` arrays or nested entities/heatmap/tags, `entity_id`/`id`, and affinity or `query.affinity`). Missing/invalid affinity stays unknown. Search 404 means no catalog match. Offline tests do not verify live response shapes, city interpretation, latency or credentials; the measured live sample above is a separate observation.
 - The supplied artist parameter table and deeper reference differ on `signal.location.query`. This follows the specification's request shape. Live validation is still necessary; unsupported parameters are not silently replaced.
