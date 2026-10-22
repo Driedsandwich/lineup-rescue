@@ -18,7 +18,7 @@ Lineup Rescue is an agentic tool for that night. It does not search the whole wo
 2. **Phone list.** The booker's candidates, each with: available (yes/no), can arrive within 48 h with crew and gear (yes/no), travel time in hours (optional), notes (free text, never sent to Qloo).
 3. **Run.** The agent:
    1. applies the hard constraints and lists excluded candidates with the reason;
-   2. resolves every act name to a Qloo entity; ambiguous names come back as "needs input" with options; names Qloo does not know are shown as "not in the Qloo catalog" and are never scored or guessed;
+   2. resolves every act name to a Qloo entity; ambiguous names come back as "needs input" with options; names for which the search returns no entities are shown as "not in the Qloo catalog" and are never scored or guessed (live search also returns look-alike names, so an unknown name usually comes back as a choice rather than as missing);
    3. ranks the eligible candidates against the cancelled act's audience in the city;
    4. ranks the eligible candidates against the remaining lineup's audience in the city;
    5. checks how strong each finalist's audience is around the festival's region (heatmap);
