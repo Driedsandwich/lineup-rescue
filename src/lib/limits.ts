@@ -7,7 +7,7 @@ const MAX_KEYS = 10_000;
 function evictOldest<T>(table: Map<string, T>) {
   if (table.size >= MAX_KEYS) table.delete(table.keys().next().value!);
 }
-function positiveInteger(value: string | undefined, fallback: number) {
+export function positiveInteger(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
@@ -48,8 +48,8 @@ export class RunLimiter {
 
 export class QlooRunLimiter {
   private ips = new Map<string, { window: Counter; daily: Counter }>();
-  constructor(private now = Date.now, private perIp = positiveInteger(process.env.QLOO_RUNS_PER_IP, 30),
-    private perIpDay = positiveInteger(process.env.QLOO_RUNS_PER_IP_DAY, 300)) {}
+  constructor(private now = Date.now, private perIp = positiveInteger(process.env.QLOO_RUNS_PER_IP, 10),
+    private perIpDay = positiveInteger(process.env.QLOO_RUNS_PER_IP_DAY, 40)) {}
 
   // Count once before live Qloo work, including failed or cancelled runs. Neither
   // result-cache hits nor shared requests nor mock Qloo work reach this check.

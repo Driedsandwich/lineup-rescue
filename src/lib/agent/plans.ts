@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { z, ZodError } from "zod";
 import { responseSchema, submissionSchema, type Plan, type RescueResponse, type Submission } from "../contracts";
 import type { ToolContext } from "./tools";
+import type { Heat } from "../qloo/types";
 
 export const DISCLAIMERS = [
   "Qloo results describe what groups tend to like, not what one person will do.",
@@ -41,6 +42,15 @@ export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["l
 }
 function metric(value: number | null | undefined, sample: boolean) {
   return value == null ? "No affinity data available" : `${sample ? "Synthetic pseudo-affinity" : "Qloo affinity"} ${value.toFixed(3)} (not a probability)`;
+}
+function heatEvidence(heat: Heat[], city: string, sample: boolean) {
+  if (!heat.length) return "No local heat evidence available.";
+  const named = heat.filter(h => h.label.trim() && h.label !== "Unnamed area" && !/^[0-9b-hjkmnp-z]{4,12}$/.test(h.label.trim()));
+  const places = named.map(h => `${h.label}: ${metric(h.affinity, sample)}`).join("; ");
+  if (named.length === heat.length) return places;
+  const affinities = heat.flatMap(h => h.affinity === null ? [] : [h.affinity]);
+  const top = affinities.length ? `top ${Math.max(...affinities).toFixed(3)}, not a probability` : "no affinity data available";
+  return `${heat.length} ${heat.length === 1 ? "area" : "areas"} in ${city} with ${sample ? "synthetic local affinity" : "local affinity"} (${top})${places ? `; ${places}` : ""}`;
 }
 export class SubmissionError extends Error {
   constructor(message: string, readonly plan_id: string | null = null) {
@@ -167,7 +177,7 @@ export async function finalise(ctx: ToolContext, raw: unknown, { llm = llmMode()
     return { ...plan, evidence: {
       fit_original_audience: `${plan.promoted_act ?? plan.replacement}: ${metric(originalFit?.affinity, sample)}${promoted ? `; ${plan.replacement} filling ${plan.promoted_act}'s slot: ${metric(fillFit?.affinity, sample)}` : ""}`,
       fit_lineup_audience: `${plan.replacement}: ${metric(ctx.ranking(replacement!, lineupIds)?.affinity, sample)}${ctx.request.scenario.lineup.length !== lineupIds.length + (promoted ? 1 : 0) ? "; only resolved lineup acts included" : ""}`,
-      local_heat: heat.length ? heat.map(h => `${h.label}: ${metric(h.affinity, sample)}`).join("; ") : "No local heat evidence available.",
+      local_heat: heatEvidence(heat, ctx.request.scenario.city, sample),
     }, caveats: [...plan.caveats, "Affinity is aggregate evidence, not a guarantee of audience response."] };
   });
   signal.throwIfAborted();

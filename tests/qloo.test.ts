@@ -3,6 +3,7 @@ import { QlooClient, QlooError } from "../src/lib/qloo/client";
 import { parseEntities, parseHeat, resultItems, serialize } from "../src/lib/qloo/parsing";
 import { LruCache } from "../src/lib/cache";
 import { createQloo, qlooMode } from "../src/lib/qloo";
+import { QlooRequests } from "../src/lib/qloo/requests";
 
 describe("Qloo request and parsing shapes", () => {
   it("sorts keys and comma-joins arrays without serialising undefined", () => {
@@ -23,12 +24,12 @@ describe("Qloo request and parsing shapes", () => {
   });
   it("parses heatmap and orders nested affinities without inventing absent scores", () => {
     expect(parseHeat({ results: { heatmap: [{ location: { name: "Sample region" }, query: { affinity: .8 } }, { geohash: "sample-grid" }] } })).toEqual([
-      { label: "Sample region", affinity: .8 }, { label: "sample-grid", affinity: null },
+      { label: "Sample region", affinity: .8 }, { label: "", affinity: null },
     ]);
   });
   it("uses GET, private header, expected insight params, no disk or HTTP caching", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ results: { entities: [{ entity_id: "mock-a", name: "Sample A" }, { entity_id: "not-requested", name: "Sample outsider" }] } }));
-    const client = new QlooClient("synthetic-test-credential", undefined, transport, new LruCache());
+    const client = new QlooClient("synthetic-test-credential", undefined, transport, new LruCache(), new QlooRequests());
     expect(await client.rank(["mock-a", "mock-b"], ["mock-signal"], "Bristol")).toHaveLength(1);
     const [url, init] = transport.mock.calls[0];
     expect(new URL(String(url)).searchParams.get("filter.results.entities")).toBe("mock-a,mock-b");
@@ -38,28 +39,39 @@ describe("Qloo request and parsing shapes", () => {
     await client.rank(["mock-a", "mock-b"], ["mock-signal"], "Bristol");
     expect(transport).toHaveBeenCalledTimes(1);
   });
-  it.each([429, 500, 503])("retries status %i exactly once", async status => {
+  it.each([500, 503])("retries status %i exactly once after 300 ms", async status => {
     vi.useFakeTimers();
     const transport = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(null, { status })).mockResolvedValueOnce(Response.json({ results: [] }));
-    const result = new QlooClient("synthetic", undefined, transport, new LruCache()).search("Sample One");
-    await vi.advanceTimersByTimeAsync(301);
+    const result = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample One");
+    await vi.advanceTimersByTimeAsync(299);
+    expect(transport).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
     expect(await result).toEqual([]);
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("does not retry a second 5xx", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn<typeof fetch>().mockImplementation(async () => new Response(null, { status: 503 }));
+    const result = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample");
+    const failure = expect(result).rejects.toMatchObject({ code: "http", status: 503 });
+    await vi.advanceTimersByTimeAsync(300);
+    await failure;
     expect(transport).toHaveBeenCalledTimes(2);
   });
   it("returns typed HTTP/parse/network/abort errors and never retries 401", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 401 }));
-    await expect(new QlooClient("synthetic", undefined, transport, new LruCache()).search("Sample")).rejects.toMatchObject({ code: "http", status: 401 });
+    await expect(new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample")).rejects.toMatchObject({ code: "http", status: 401 });
     expect(transport).toHaveBeenCalledTimes(1);
-    await expect(new QlooClient("synthetic", undefined, vi.fn().mockResolvedValue(new Response("not json")), new LruCache()).search("Sample")).rejects.toMatchObject({ code: "parse" });
-    await expect(new QlooClient("synthetic", undefined, vi.fn().mockRejectedValue(new Error("offline")), new LruCache()).search("Sample")).rejects.toBeInstanceOf(QlooError);
-    await expect(new QlooClient("synthetic", undefined, transport, new LruCache()).search("Sample", AbortSignal.abort())).rejects.toMatchObject({ code: "aborted" });
+    await expect(new QlooClient("synthetic", undefined, vi.fn().mockResolvedValue(new Response("not json")), new LruCache(), new QlooRequests()).search("Sample")).rejects.toMatchObject({ code: "parse" });
+    await expect(new QlooClient("synthetic", undefined, vi.fn().mockRejectedValue(new Error("offline")), new LruCache(), new QlooRequests()).search("Sample")).rejects.toBeInstanceOf(QlooError);
+    await expect(new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample", AbortSignal.abort())).rejects.toMatchObject({ code: "aborted" });
   });
   it("enforces the 15-second timeout", async () => {
     // Stub only the timeout clock; all transport remains local and synthetic.
     const abort = new AbortController();
     const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(abort.signal);
     const transport = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timed out")), { once: true })));
-    const promise = new QlooClient("synthetic", undefined, transport, new LruCache()).search("Sample");
+    const promise = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample");
     abort.abort();
     await expect(promise).rejects.toMatchObject({ code: "timeout" });
     expect(timeout).toHaveBeenCalledWith(15_000);

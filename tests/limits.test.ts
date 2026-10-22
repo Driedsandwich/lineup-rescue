@@ -53,8 +53,8 @@ it.each(["", "0", "-1", "1.5", "no", "Infinity", "9007199254740992"])("defaults 
   vi.stubEnv("QLOO_RUNS_PER_IP_DAY", value);
   let now = 0;
   const limiter = new QlooRunLimiter(() => now);
-  for (let window = 0; window < 10; window++) {
-    for (let i = 0; i < 30; i++) expect(limiter.reserve("a")).toBe(true);
+  for (let window = 0; window < 4; window++) {
+    for (let i = 0; i < 10; i++) expect(limiter.reserve("a")).toBe(true);
     expect(limiter.reserve("a")).toBe(false);
     now += 600_000;
   }

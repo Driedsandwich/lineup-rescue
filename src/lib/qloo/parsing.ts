@@ -36,7 +36,7 @@ export function parseHeat(body: unknown): Heat[] {
   return resultItems(body).map(raw => {
     const item = record(raw);
     const location = record(item.location);
-    const label = location.name ?? location.geohash ?? item.geohash ?? item.name;
-    return { label: typeof label === "string" ? label.slice(0, 200) : "Unnamed area", affinity: affinity(item) };
+    const label = [location.name, item.name].find(value => typeof value === "string" && value.trim());
+    return { label: typeof label === "string" ? label.slice(0, 200) : "", affinity: affinity(item) };
   }).sort((a, b) => (b.affinity ?? -Infinity) - (a.affinity ?? -Infinity));
 }

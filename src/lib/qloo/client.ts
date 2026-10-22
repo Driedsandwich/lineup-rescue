@@ -1,6 +1,7 @@
 import "server-only";
 import { LruCache } from "../cache";
 import { parseEntities, parseHeat, serialize } from "./parsing";
+import { qlooRequests } from "./requests";
 import type { Params, Qloo } from "./types";
 
 export class QlooError extends Error {
@@ -10,9 +11,21 @@ export class QlooError extends Error {
   }
 }
 const cache = new LruCache<unknown>(500);
+function wait(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(new QlooError("aborted")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+function resetMs(value: string | null) {
+  const seconds = Number(value);
+  return Math.min(5, Math.max(1, Number.isFinite(seconds) ? seconds : 1)) * 1_000;
+}
 export class QlooClient implements Qloo {
   readonly source = "live" as const;
-  constructor(private apiKey: string, private baseUrl = "https://hackathon.api.qloo.com", private transport: typeof fetch = fetch, private responseCache = cache) {
+  constructor(private apiKey: string, private baseUrl = "https://hackathon.api.qloo.com", private transport: typeof fetch = fetch, private responseCache = cache, private requests = qlooRequests) {
     const url = new URL(baseUrl);
     if (url.protocol !== "https:" || url.username || url.password) throw new Error("Qloo base URL must use HTTPS without embedded credentials.");
   }
@@ -20,40 +33,55 @@ export class QlooClient implements Qloo {
     const key = `${this.baseUrl}${path}?${serialize(params)}`;
     const cached = this.responseCache.get(key);
     if (cached !== undefined) return cached;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const timeout = AbortSignal.timeout(15_000);
-      const combined = signal ? AbortSignal.any([timeout, signal]) : timeout;
+    let rateRetries = 0;
+    let serverRetries = 0;
+    while (true) {
       try {
-        combined.throwIfAborted();
-        const response = await this.transport(key, { method: "GET", headers: { "X-Api-Key": this.apiKey }, signal: combined, cache: "no-store", redirect: "error" });
-        if (!response.ok) {
-          if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
-            await response.body?.cancel();
-            await new Promise<void>((resolve, reject) => {
-              const abort = () => { clearTimeout(timer); reject(new QlooError("aborted")); };
-              const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, 300);
-              signal?.addEventListener("abort", abort, { once: true });
-              if (signal?.aborted) abort();
-            });
-            continue;
+        const result = await this.requests.run(async () => {
+          // Queue time is governed by the caller's deadline. Each actual HTTP
+          // attempt retains its own 15-second timeout, including body parsing.
+          const timeout = AbortSignal.timeout(15_000);
+          const combined = signal ? AbortSignal.any([timeout, signal]) : timeout;
+          try {
+            combined.throwIfAborted();
+            this.requests.recordSent();
+            const response = await this.transport(key, { method: "GET", headers: { "X-Api-Key": this.apiKey }, signal: combined, cache: "no-store", redirect: "error" });
+            if (!response.ok) {
+              const failure = { status: response.status, reset: response.headers.get("x-second-ratelimit-reset") };
+              await response.body?.cancel();
+              return failure;
+            }
+            let body: unknown;
+            try { body = await response.json(); } catch {
+              if (combined.aborted) throw new QlooError(signal?.aborted ? "aborted" : "timeout");
+              throw new QlooError("parse");
+            }
+            combined.throwIfAborted();
+            if (!body || typeof body !== "object" || (body as { success?: boolean }).success === false) throw new QlooError("parse");
+            return { body };
+          } catch (error) {
+            if (error instanceof QlooError) throw error;
+            if (combined.aborted) throw new QlooError(signal?.aborted ? "aborted" : "timeout");
+            throw new QlooError("network");
           }
-          throw new QlooError("http", response.status);
+        }, signal);
+        if ("body" in result) {
+          this.responseCache.set(key, result.body);
+          return result.body;
         }
-        let body: unknown;
-        try { body = await response.json(); } catch {
-          if (combined.aborted) throw new QlooError(signal?.aborted ? "aborted" : "timeout");
-          throw new QlooError("parse");
-        }
-        if (!body || typeof body !== "object" || (body as { success?: boolean }).success === false) throw new QlooError("parse");
-        this.responseCache.set(key, body);
-        return body;
+        if (result.status === 429 && rateRetries < 2) {
+          rateRetries++;
+          await wait(resetMs(result.reset), signal);
+        } else if (result.status >= 500 && serverRetries < 1) {
+          serverRetries++;
+          await wait(300, signal);
+        } else throw new QlooError("http", result.status);
       } catch (error) {
         if (error instanceof QlooError) throw error;
-        if (combined.aborted) throw new QlooError(signal?.aborted ? "aborted" : "timeout");
+        if (signal?.aborted) throw new QlooError("aborted");
         throw new QlooError("network");
       }
     }
-    throw new QlooError("http");
   }
   async search(name: string, signal?: AbortSignal) {
     return parseEntities(await this.get("/search", { query: name, types: ["urn:entity:artist"], take: 5 }, signal)).slice(0, 5);

@@ -8,6 +8,8 @@ process.env.LLM_RUNS_PER_IP = "";
 process.env.LLM_RUNS_PER_DAY = "";
 process.env.QLOO_RUNS_PER_IP = "";
 process.env.QLOO_RUNS_PER_IP_DAY = "";
+process.env.QLOO_MAX_PER_SECOND = "";
+process.env.QLOO_CALLS_PER_DAY = "";
 beforeEach(() => {
   // Any unexpected provider request fails immediately, even with keys in the host environment.
   vi.stubGlobal("fetch", vi.fn(() => { throw new Error("Network disabled in tests"); }));

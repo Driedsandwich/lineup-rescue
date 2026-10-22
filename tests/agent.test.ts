@@ -6,7 +6,7 @@ import { filterCandidates } from "../src/lib/agent/constraints";
 import { ToolContext, definitions } from "../src/lib/agent/tools";
 import { envelope, finalise } from "../src/lib/agent/plans";
 import { mockPlan } from "../src/lib/agent/mock";
-import { liveLoop, runAgent, type MessageSender } from "../src/lib/agent/loop";
+import { liveLoop, runAgent, SYSTEM_PROMPT, type MessageSender } from "../src/lib/agent/loop";
 import { MockQloo } from "../src/lib/qloo/mock";
 
 function context(mode: "qloo" | "baseline" = "qloo", changes: Partial<RescueRequest> = {}) {
@@ -26,6 +26,30 @@ function submission(plans: Submission["plans"] = [{ ...direct }]): Submission {
   return { plans, announcement: { short_post: "Programme under review.", email_subject: "Programme update", email_body: "Check official channels for confirmed changes." },
     refund_checklist: sample.ticket_types.map(ticket_type => ({ ticket_type, items: ["Verify the published terms."] })) };
 }
+
+it("instructs the model to describe server-attached measurements without pending claims", () => {
+  expect(SYSTEM_PROMPT).toContain("fit against the remaining lineup and local heat are measured by the server after you submit");
+  expect(SYSTEM_PROMPT).toContain("rationale must not describe any measurement as pending or not yet measured");
+});
+
+it.each([
+  { labels: ["9v6kpyq", "9v6kpyr", "9v6kpys"], named: false },
+  { labels: ["", "Unnamed area", "9v6kpyr"], named: false },
+  { labels: ["9v6kpyq", "Downtown Austin", "9v6kpys"], named: true },
+  { labels: ["Downtown Austin"], named: true },
+])("keeps heat evidence readable for $labels", async ({ labels, named }) => {
+  const ctx = await resolved();
+  vi.spyOn(ctx.qloo, "heat").mockResolvedValue(labels.map((label, i) => ({ label, affinity: i ? .8 : 1 })));
+  const result = await finalise(ctx, submission());
+  const evidence = result.plans[0].evidence.local_heat;
+  expect(evidence).not.toMatch(/\b[0-9b-hjkmnp-z]{4,12}\b/);
+  if (labels.length > 1) {
+    expect(evidence).toContain(`3 areas in ${sample.city}`);
+    expect(evidence).toContain("top 1.000, not a probability");
+  }
+  expect(evidence.includes("Downtown Austin")).toBe(named);
+  expect(result.plans[0].rationale).toBe(direct.rationale);
+});
 
 describe("hard constraints and grounded plan assembly", () => {
   it("excludes unavailable/late acts before agent tools and accepts absent travel time", () => {

@@ -6,6 +6,7 @@ import { clientKey } from "../../../lib/client-key";
 import { runAgent, AgentError } from "../../../lib/agent/loop";
 import { llmMode } from "../../../lib/agent/plans";
 import { qlooMode } from "../../../lib/qloo";
+import { qlooRequests } from "../../../lib/qloo/requests";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -72,7 +73,7 @@ export async function POST(request: Request) {
     }
     const ipKey = clientKey(ip);
     const run = runAgent(input, controller.signal, { trace, startedAt: start,
-      reserveQloo: () => qlooLimiter.reserve(ipKey), reserveModel: () => limiter.reserve(ipKey) }).then(result => {
+      reserveQloo: () => qlooRequests.canStartRun() && qlooLimiter.reserve(ipKey), reserveModel: () => limiter.reserve(ipKey) }).then(result => {
       controller.signal.throwIfAborted();
       if (result.llm !== "fallback") results.set(key, result);
       return result;
