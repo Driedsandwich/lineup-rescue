@@ -15,6 +15,8 @@ export function llmMode(): "live" | "mock" {
 }
 export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["llm"] = llmMode(), fallbackReason?: string): RescueResponse {
   const s = ctx.request.scenario;
+  const failed = ctx.lookupFailed;
+  const lookupNotice = failed.length ? [`Qloo could not be reached for ${failed.length} ${failed.length === 1 ? "act" : "acts"} in this run (${failed.slice(0, 5).join(", ")}${failed.length > 5 ? ` and ${failed.length - 5} more` : ""}); they were not scored.`] : [];
   const fallbackNotice = fallbackReason === "qloo_limit" ? "Audience data was not fetched because of high request volume from this address. These plans use fixed rules only."
     : fallbackReason === "qloo_daily_budget" ? "Audience data was not fetched because this server reached its daily Qloo request budget. These plans use fixed rules only."
     : fallbackReason === "ip_limit" ? "Per-IP usage limit for the language model reached."
@@ -36,7 +38,7 @@ export function envelope(ctx: ToolContext, plans: Plan[], llm: RescueResponse["l
       "Assign an organiser contact and verify replacement fees, payment timing and production requirements separately.",
     ] })),
     trace: [...ctx.trace],
-    disclaimers: [...DISCLAIMERS, ...(ctx.qloo.source === "mock" ? ["Sample data: fictional acts and synthetic pseudo-affinity; these are not live Qloo results."] : []), ...(ctx.request.mode === "baseline" ? ["Ungrounded suggestions; no Qloo catalog lookup or audience scoring was performed."] : []), ...(llm === "fallback" ? [
+    disclaimers: [...DISCLAIMERS, ...lookupNotice, ...(ctx.qloo.source === "mock" ? ["Sample data: fictional acts and synthetic pseudo-affinity; these are not live Qloo results."] : []), ...(ctx.request.mode === "baseline" ? ["Ungrounded suggestions; no Qloo catalog lookup or audience scoring was performed."] : []), ...(llm === "fallback" ? [
       `${fallbackNotice} These plans were assembled by fixed rules from ${ctx.request.mode === "baseline" ? "the same scenario and hard constraints; no Qloo evidence was used" : "the same Qloo evidence"}.`,
     ] : [])],
   };

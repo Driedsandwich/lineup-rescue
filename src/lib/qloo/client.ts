@@ -35,6 +35,7 @@ export class QlooClient implements Qloo {
     if (cached !== undefined) return cached;
     let rateRetries = 0;
     let serverRetries = 0;
+    let networkRetries = 0;
     while (true) {
       try {
         const result = await this.requests.run(async () => {
@@ -77,9 +78,12 @@ export class QlooClient implements Qloo {
           await wait(300, signal);
         } else throw new QlooError("http", result.status);
       } catch (error) {
-        if (error instanceof QlooError) throw error;
         if (signal?.aborted) throw new QlooError("aborted");
-        throw new QlooError("network");
+        const failure = error instanceof QlooError ? error : new QlooError("network");
+        if ((failure.code === "network" || failure.code === "timeout") && networkRetries < 1) {
+          networkRetries++;
+          await wait(300, signal);
+        } else throw failure;
       }
     }
   }

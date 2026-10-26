@@ -58,6 +58,59 @@ describe("Qloo request and parsing shapes", () => {
     await failure;
     expect(transport).toHaveBeenCalledTimes(2);
   });
+  it("retries a network error once after 300 ms through the gate, counting both sent attempts", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn<typeof fetch>().mockRejectedValueOnce(new TypeError("Synthetic network failure"))
+      .mockResolvedValueOnce(Response.json({ results: [{ entity_id: "synthetic-act", name: "Synthetic Act" }] }));
+    const requests = new QlooRequests(1, 2);
+    const gate = vi.spyOn(requests, "run");
+    const sent = vi.spyOn(requests, "recordSent");
+    const client = new QlooClient("synthetic", undefined, transport, new LruCache(), requests);
+    const result = client.search("Synthetic Act");
+    await vi.advanceTimersByTimeAsync(299);
+    expect(transport).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(gate).toHaveBeenCalledTimes(2);
+    expect(transport).toHaveBeenCalledTimes(1); // Retry is waiting in the shared gate.
+    await vi.advanceTimersByTimeAsync(700);
+    expect(await result).toEqual([{ entity_id: "synthetic-act", name: "Synthetic Act", affinity: null }]);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(sent).toHaveBeenCalledTimes(2);
+    expect(requests.canStartRun()).toBe(false);
+    gate.mockRestore();
+    sent.mockRestore();
+  });
+  it("does not retry a second network failure", async () => {
+    vi.useFakeTimers();
+    const transport = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Synthetic network failure"));
+    const result = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Synthetic Act");
+    const failure = expect(result).rejects.toMatchObject({ code: "network" });
+    await vi.advanceTimersByTimeAsync(300);
+    await failure;
+    expect(transport).toHaveBeenCalledTimes(2);
+  });
+  it("aborts during the network retry wait without sending another attempt", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const transport = vi.fn<typeof fetch>().mockRejectedValue(new TypeError("Synthetic network failure"));
+    const result = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Synthetic Act", controller.signal);
+    const failure = expect(result).rejects.toMatchObject({ code: "aborted" });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(transport).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await failure;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it("never retries when the caller aborts as the transport fails", async () => {
+    const controller = new AbortController();
+    const transport = vi.fn<typeof fetch>().mockImplementation(async () => {
+      controller.abort();
+      throw new QlooError("network");
+    });
+    await expect(new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Synthetic Act", controller.signal)).rejects.toMatchObject({ code: "aborted" });
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   it("returns typed HTTP/parse/network/abort errors and never retries 401", async () => {
     const transport = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 401 }));
     await expect(new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample")).rejects.toMatchObject({ code: "http", status: 401 });
@@ -66,14 +119,24 @@ describe("Qloo request and parsing shapes", () => {
     await expect(new QlooClient("synthetic", undefined, vi.fn().mockRejectedValue(new Error("offline")), new LruCache(), new QlooRequests()).search("Sample")).rejects.toBeInstanceOf(QlooError);
     await expect(new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample", AbortSignal.abort())).rejects.toMatchObject({ code: "aborted" });
   });
-  it("enforces the 15-second timeout", async () => {
+  it("enforces a fresh 15-second timeout per attempt and retries only once", async () => {
+    vi.useFakeTimers();
     // Stub only the timeout clock; all transport remains local and synthetic.
-    const abort = new AbortController();
-    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(abort.signal);
+    const first = new AbortController();
+    const second = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(first.signal).mockReturnValueOnce(second.signal);
     const transport = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("timed out")), { once: true })));
     const promise = new QlooClient("synthetic", undefined, transport, new LruCache(), new QlooRequests()).search("Sample");
-    abort.abort();
-    await expect(promise).rejects.toMatchObject({ code: "timeout" });
+    const failure = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    first.abort();
+    await vi.advanceTimersByTimeAsync(299);
+    expect(transport).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(transport).toHaveBeenCalledTimes(2);
+    expect(second.signal.aborted).toBe(false);
+    second.abort();
+    await failure;
+    expect(timeout).toHaveBeenCalledTimes(2);
     expect(timeout).toHaveBeenCalledWith(15_000);
     timeout.mockRestore();
   });

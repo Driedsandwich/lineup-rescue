@@ -42,7 +42,7 @@ export function definitions(mode: RescueRequest["mode"], canResolve = true): Too
     input_schema: strictSchema(z.toJSONSchema(toolSchemas[name], { target: "draft-7" })) as Tool.InputSchema,
   }));
 }
-export type Resolution = { name: string; status: "matched" | "ambiguous" | "not_found"; entities: Entity[] };
+export type Resolution = { name: string; status: "matched" | "ambiguous" | "not_found" | "lookup_failed"; entities: Entity[] };
 export type ToolResult = { status: Trace["status"]; results: unknown[]; error?: string };
 export type Ranking = { options: string[]; signals: string[]; results: Entity[] };
 
@@ -64,6 +64,7 @@ export class ToolContext {
     }));
   }
   get notInCatalog() { return [...this.resolutions.values()].filter(r => r.status === "not_found").map(r => r.name); }
+  get lookupFailed() { return [...this.resolutions.values()].filter(r => r.status === "lookup_failed").map(r => r.name); }
   get canResolve() { return [...this.names].some(name => !this.resolutions.has(name)); }
   private known(id: string) { return [...this.resolved.values()].some(e => e.entity_id === id); }
   private redact(params: Record<string, unknown>): Record<string, unknown> {
@@ -90,9 +91,15 @@ export class ToolContext {
             let entities: Entity[];
             try { entities = await abortable(this.qloo.search(act, signal), signal); }
             catch (error) {
+              signal.throwIfAborted();
+              if (error instanceof QlooError && error.code === "aborted") throw error;
               // Search's documented 404 means no matching entities, not a guessed ID.
               if (error instanceof QlooError && error.code === "http" && error.status === 404) entities = [];
-              else throw error;
+              else {
+                const resolution: Resolution = { name: act, status: "lookup_failed", entities: [] };
+                this.resolutions.set(act, resolution);
+                return resolution;
+              }
             }
             signal.throwIfAborted();
             entities = entities.slice(0, 5);
@@ -104,7 +111,10 @@ export class ToolContext {
             if (match) this.resolved.set(act, match);
             return resolution;
           }));
-          result = { status: resolved.some(r => r.status === "ambiguous") ? "needs_input" : resolved.some(r => r.status === "matched") ? "ok" : "empty", results: resolved };
+          const failed = resolved.filter(r => r.status === "lookup_failed");
+          if (failed.length) params = { ...params, resolution_status: failed.length === resolved.length ? "failed" : "partial", lookup_failed_count: failed.length };
+          const fatal = failed.some(r => r.name === this.request.scenario.cancelled_act.name) || failed.length === resolved.length;
+          result = { status: fatal ? "error" : resolved.some(r => r.status === "ambiguous") ? "needs_input" : resolved.some(r => r.status === "matched") ? "ok" : "empty", results: resolved };
           break;
         }
         case "rank_against_audience": {

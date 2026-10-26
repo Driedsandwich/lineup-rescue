@@ -100,7 +100,8 @@ export async function POST(request: Request) {
           reserveQloo: () => !qlooRequests.canStartRun() ? "daily_budget" : !qlooLimiter.reserve(ipKey) ? "client" : undefined,
           reserveModel: () => limiter.reserve(ipKey) }), sharedController.signal);
         sharedController.signal.throwIfAborted();
-        if (result.llm !== "fallback") results.set(key, result);
+        const lookupFailed = result.trace.some(row => row.tool === "resolve_acts" && Number(row.params.lookup_failed_count) > 0);
+        if (result.llm !== "fallback" && !lookupFailed) results.set(key, result);
         return result;
       }).finally(() => {
         entry.settled = true;
