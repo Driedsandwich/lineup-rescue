@@ -46,6 +46,10 @@ it("renders unknown evidence without a numeric meter and labels actual affinity 
   expect(unknown).toContain("UNKNOWN"); expect(unknown).not.toContain("<meter");
   const measured = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "Qloo affinity 0.500 (not a probability)", baseline: false }));
   expect(measured).toContain('aria-label="Local heat: affinity 0.500, not a probability"');
+  const areas = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "3 areas in Austin, TX with local affinity (top 1.000, not a probability)", baseline: false }));
+  expect(areas).toContain("3 AREAS"); expect(areas).not.toContain("UNKNOWN"); expect(areas).not.toContain("<meter");
+  const one = renderToStaticMarkup(createElement(EvidenceMeter, { label: "Local heat", text: "1 area in Austin, TX with local affinity (top 1.000, not a probability)", baseline: false }));
+  expect(one).toContain("1 AREA<");
 });
 
 it.each([

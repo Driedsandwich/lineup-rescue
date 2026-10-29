@@ -5,7 +5,9 @@ type Props = { result: RescueResponse; cancelledActName: string; differences: Re
 
 export function EvidenceMeter({ label, text, baseline }: { label: string; text: string; baseline: boolean }) {
   const value = baseline ? null : evidenceValue(text);
-  return <div className="evidence-item"><div className="split"><span>{label}</span><strong className="mono">{value === null ? baseline ? "NO DATA" : "UNKNOWN" : value.toFixed(3)}</strong></div>
+  const areas = baseline || value !== null ? null : text.match(/^(\d+) areas? in /);
+  const tag = value !== null ? value.toFixed(3) : baseline ? "NO DATA" : areas ? `${areas[1]} ${areas[1] === "1" ? "AREA" : "AREAS"}` : "UNKNOWN";
+  return <div className="evidence-item"><div className="split"><span>{label}</span><strong className="mono">{tag}</strong></div>
     {value !== null ? <meter min={0} max={1} value={value} aria-label={`${label}: affinity ${value.toFixed(3)}, not a probability`} /> : <div className="empty-meter" aria-hidden="true" />}
     <small>{baseline ? "No audience evidence. Ungrounded suggestion." : text}</small>
   </div>;
